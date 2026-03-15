@@ -92,6 +92,13 @@ type AgentDependencies = {
   now?: () => Date;
   llm?: StructuredLanguageModel;
   search?: SearchProvider;
+  logger?: AgentLogger;
+};
+
+type AgentLogger = {
+  info(message: string, context?: Record<string, unknown>): void;
+  warn(message: string, context?: Record<string, unknown>): void;
+  error(message: string, context?: Record<string, unknown>): void;
 };
 
 type StructuredLanguageModel = {
@@ -204,6 +211,7 @@ export class ConstructAgentService {
   private readonly now: () => Date;
   private readonly llm: StructuredLanguageModel;
   private readonly search: SearchProvider;
+  private readonly logger: AgentLogger;
   private readonly jobs = new Map<string, AgentJobRecord>();
 
   constructor(
@@ -223,6 +231,7 @@ export class ConstructAgentService {
       "generated-plans"
     );
     this.now = dependencies.now ?? (() => new Date());
+    this.logger = dependencies.logger ?? createConsoleAgentLogger();
 
     if (dependencies.llm) {
       this.llm = dependencies.llm;
@@ -231,7 +240,8 @@ export class ConstructAgentService {
       this.llm = new OpenAIStructuredLanguageModel({
         apiKey: config.openAiApiKey,
         baseUrl: config.openAiBaseUrl,
-        model: config.openAiModel
+        model: config.openAiModel,
+        logger: this.logger
       });
     }
 
@@ -242,7 +252,8 @@ export class ConstructAgentService {
       this.search = buildSearchProvider({
         provider: config.searchProvider,
         tavilyApiKey: config.tavilyApiKey,
-        depth: config.tavilySearchDepth
+        depth: config.tavilySearchDepth,
+        logger: this.logger
       });
     }
   }
@@ -257,6 +268,12 @@ export class ConstructAgentService {
   ): AgentJobCreatedResponse {
     const request = PlanningSessionStartRequestSchema.parse(input);
     const job = this.createJob("planning-questions");
+    this.logger.info("Queued planning questions job.", {
+      jobId: job.jobId,
+      kind: job.kind,
+      goal: request.goal,
+      learningStyle: request.learningStyle
+    });
 
     void this.runJob(job, async () => {
       const result = await this.runPlanningQuestionGraph(job.jobId, request);
@@ -277,6 +294,12 @@ export class ConstructAgentService {
   ): AgentJobCreatedResponse {
     const request = PlanningSessionCompleteRequestSchema.parse(input);
     const job = this.createJob("planning-plan");
+    this.logger.info("Queued planning roadmap job.", {
+      jobId: job.jobId,
+      kind: job.kind,
+      sessionId: request.sessionId,
+      answerCount: request.answers.length
+    });
 
     void this.runJob(job, async () => {
       const result = await this.runPlanningPlanGraph(job.jobId, request);
@@ -295,6 +318,13 @@ export class ConstructAgentService {
   createRuntimeGuideJob(input: RuntimeGuideRequest): AgentJobCreatedResponse {
     const request = RuntimeGuideRequestSchema.parse(input);
     const job = this.createJob("runtime-guide");
+    this.logger.info("Queued runtime guide job.", {
+      jobId: job.jobId,
+      kind: job.kind,
+      stepId: request.stepId,
+      filePath: request.filePath,
+      tests: request.tests
+    });
 
     void this.runJob(job, async () => {
       const result = await this.runRuntimeGuideGraph(job.jobId, request);
@@ -396,12 +426,23 @@ export class ConstructAgentService {
   }
 
   private async runJob<T>(job: AgentJobRecord, task: () => Promise<T>): Promise<void> {
+    const startedAt = Date.now();
     this.updateJobStatus(job, "running");
+    this.logger.info("Started agent job.", {
+      jobId: job.jobId,
+      kind: job.kind
+    });
 
     try {
       const result = await task();
       job.result = result;
       this.updateJobStatus(job, "completed");
+      this.logger.info("Completed agent job.", {
+        jobId: job.jobId,
+        kind: job.kind,
+        durationMs: Date.now() - startedAt,
+        result: summarizeJobResult(job.kind, result)
+      });
       this.broadcast(job, "agent-complete", {
         jobId: job.jobId,
         result
@@ -410,6 +451,12 @@ export class ConstructAgentService {
     } catch (error) {
       job.error = error instanceof Error ? error.message : "Unknown agent failure.";
       this.updateJobStatus(job, "failed");
+      this.logger.error("Agent job failed.", {
+        jobId: job.jobId,
+        kind: job.kind,
+        durationMs: Date.now() - startedAt,
+        error: job.error
+      });
       this.emitEvent(job, {
         stage: "failed",
         title: "Agent run failed",
@@ -428,8 +475,17 @@ export class ConstructAgentService {
     job: AgentJobRecord,
     status: AgentJobRecord["status"]
   ): void {
+    const previousStatus = job.status;
     job.status = status;
     job.updatedAt = this.now().toISOString();
+    if (previousStatus !== status) {
+      this.logger.info("Agent job status changed.", {
+        jobId: job.jobId,
+        kind: job.kind,
+        from: previousStatus,
+        to: status
+      });
+    }
     this.broadcast(job, "agent-state", this.getJob(job.jobId));
   }
 
@@ -458,7 +514,39 @@ export class ConstructAgentService {
 
     job.events.push(event);
     job.updatedAt = event.timestamp;
+    this.logAgentEvent(job, event);
     this.broadcast(job, "agent-event", event);
+  }
+
+  private logAgentEvent(job: AgentJobRecord, event: AgentEvent): void {
+    const payloadSummary = summarizeAgentEventPayload(event);
+    const context: Record<string, unknown> = {
+      jobId: job.jobId,
+      kind: job.kind,
+      stage: event.stage,
+      level: event.level,
+      title: event.title
+    };
+
+    if (event.detail) {
+      context.detail = event.detail;
+    }
+
+    if (payloadSummary) {
+      context.payload = payloadSummary;
+    }
+
+    if (event.level === "error") {
+      this.logger.error("Agent emitted event.", context);
+      return;
+    }
+
+    if (event.level === "warning") {
+      this.logger.warn("Agent emitted event.", context);
+      return;
+    }
+
+    this.logger.info("Agent emitted event.", context);
   }
 
   private broadcast(job: AgentJobRecord, eventName: string, payload: unknown): void {
@@ -778,6 +866,12 @@ export class ConstructAgentService {
     await mkdir(this.generatedPlansDirectory, { recursive: true });
     const artifactPath = path.join(this.generatedPlansDirectory, `${session.sessionId}.json`);
     await writeFile(artifactPath, `${JSON.stringify(plan, null, 2)}\n`, "utf8");
+    this.logger.info("Persisted generated planning artifact.", {
+      sessionId: session.sessionId,
+      artifactPath,
+      stepCount: plan.steps.length,
+      architectureNodeCount: plan.architecture.length
+    });
   }
 
   private async readPlanningState(): Promise<PlanningStateFile> {
@@ -846,18 +940,24 @@ export class ConstructAgentService {
       `${JSON.stringify(nextKnowledgeBase, null, 2)}\n`,
       "utf8"
     );
+    this.logger.info("Merged planning signals into learner knowledge base.", {
+      sessionId: session.sessionId,
+      goal: session.goal,
+      conceptCount: nextKnowledgeBase.concepts.length,
+      goalCount: nextKnowledgeBase.goals.length
+    });
   }
 }
 
 class OpenAIStructuredLanguageModel implements StructuredLanguageModel {
   private readonly client: ChatOpenAI;
   private readonly model: string;
+  private readonly logger: AgentLogger;
 
-  constructor(input: { apiKey: string; baseUrl?: string; model: string }) {
+  constructor(input: { apiKey: string; baseUrl?: string; model: string; logger: AgentLogger }) {
     this.client = new ChatOpenAI({
       apiKey: input.apiKey,
       model: input.model,
-      temperature: 0,
       configuration: input.baseUrl
         ? {
             baseURL: input.baseUrl
@@ -865,6 +965,7 @@ class OpenAIStructuredLanguageModel implements StructuredLanguageModel {
         : undefined
     });
     this.model = input.model;
+    this.logger = input.logger;
   }
 
   async parse<T extends z.ZodTypeAny>(input: {
@@ -875,6 +976,14 @@ class OpenAIStructuredLanguageModel implements StructuredLanguageModel {
     maxOutputTokens?: number;
     verbosity?: "low" | "medium" | "high";
   }): Promise<z.infer<T>> {
+    const startedAt = Date.now();
+    this.logger.info("Starting OpenAI structured generation.", {
+      model: this.model,
+      schemaName: input.schemaName,
+      promptChars: input.prompt.length,
+      maxOutputTokens: input.maxOutputTokens ?? 4_000,
+      verbosity: input.verbosity ?? "medium"
+    });
     const structuredModel = this.client.withStructuredOutput(input.schema, {
       name: input.schemaName,
       method: "jsonSchema"
@@ -891,24 +1000,39 @@ class OpenAIStructuredLanguageModel implements StructuredLanguageModel {
       ],
       ["user", input.prompt]
     ]);
-
-    return input.schema.parse(response);
+    const parsed = input.schema.parse(response);
+    this.logger.info("Completed OpenAI structured generation.", {
+      model: this.model,
+      schemaName: input.schemaName,
+      durationMs: Date.now() - startedAt,
+      response: summarizeStructuredOutput(input.schemaName, parsed)
+    });
+    return parsed;
   }
 }
 
 class TavilySearchProvider implements SearchProvider {
   private readonly client;
+  private readonly logger: AgentLogger;
 
   constructor(
     private readonly apiKey: string,
-    private readonly depth: "basic" | "advanced" | "fast" | "ultra-fast"
+    private readonly depth: "basic" | "advanced" | "fast" | "ultra-fast",
+    logger: AgentLogger
   ) {
     this.client = tavily({
       apiKey: this.apiKey
     });
+    this.logger = logger;
   }
 
   async research(query: string): Promise<ResearchDigest> {
+    const startedAt = Date.now();
+    this.logger.info("Starting Tavily research.", {
+      provider: "tavily",
+      depth: this.depth,
+      query
+    });
     const response = await this.client.search(query, {
       searchDepth: this.depth,
       maxResults: 5,
@@ -916,7 +1040,7 @@ class TavilySearchProvider implements SearchProvider {
       includeRawContent: false
     });
 
-    return {
+    const digest = {
       query,
       answer: response.answer,
       sources: response.results.map((result) => ({
@@ -926,6 +1050,15 @@ class TavilySearchProvider implements SearchProvider {
         publishedDate: result.publishedDate
       }))
     };
+    this.logger.info("Completed Tavily research.", {
+      provider: "tavily",
+      depth: this.depth,
+      query,
+      durationMs: Date.now() - startedAt,
+      sourceCount: digest.sources.length,
+      sources: digest.sources.map((source) => source.title)
+    });
+    return digest;
   }
 }
 
@@ -933,12 +1066,13 @@ function buildSearchProvider(input: {
   provider: "tavily" | "exa";
   tavilyApiKey: string;
   depth: "basic" | "advanced" | "fast" | "ultra-fast";
+  logger: AgentLogger;
 }): SearchProvider {
   if (input.provider === "exa") {
     throw new Error("Search provider EXA is not implemented yet. Set CONSTRUCT_SEARCH_PROVIDER=tavily.");
   }
 
-  return new TavilySearchProvider(input.tavilyApiKey, input.depth);
+  return new TavilySearchProvider(input.tavilyApiKey, input.depth, input.logger);
 }
 
 function resolveAgentConfig(): AgentConfig {
@@ -983,6 +1117,165 @@ function resolveAgentConfig(): AgentConfig {
         | "fast"
         | "ultra-fast"
         | undefined) ?? "advanced"
+  };
+}
+
+function createConsoleAgentLogger(): AgentLogger {
+  return {
+    info(message, context) {
+      console.log(formatAgentLogLine("INFO", message, context));
+    },
+    warn(message, context) {
+      console.warn(formatAgentLogLine("WARN", message, context));
+    },
+    error(message, context) {
+      console.error(formatAgentLogLine("ERROR", message, context));
+    }
+  };
+}
+
+function formatAgentLogLine(
+  level: "INFO" | "WARN" | "ERROR",
+  message: string,
+  context?: Record<string, unknown>
+): string {
+  const timestamp = new Date().toISOString();
+
+  if (!context || Object.keys(context).length === 0) {
+    return `[construct-agent] ${timestamp} ${level} ${message}`;
+  }
+
+  return `[construct-agent] ${timestamp} ${level} ${message} ${formatLogContext(context)}`;
+}
+
+function formatLogContext(context: Record<string, unknown>): string {
+  return Object.entries(context)
+    .filter(([, value]) => value !== undefined)
+    .map(([key, value]) => `${key}=${stringifyLogValue(value)}`)
+    .join(" ");
+}
+
+function stringifyLogValue(value: unknown): string {
+  if (typeof value === "string") {
+    return JSON.stringify(value);
+  }
+
+  if (
+    typeof value === "number" ||
+    typeof value === "boolean" ||
+    value === null
+  ) {
+    return String(value);
+  }
+
+  try {
+    return JSON.stringify(value);
+  } catch {
+    return JSON.stringify(String(value));
+  }
+}
+
+function summarizeAgentEventPayload(event: AgentEvent): Record<string, unknown> | null {
+  if (!event.payload) {
+    return null;
+  }
+
+  if (event.stage === "research") {
+    const payload = event.payload as {
+      query?: unknown;
+      sources?: Array<{ title?: string; url?: string }>;
+    };
+
+    return {
+      query: typeof payload.query === "string" ? truncateText(payload.query, 180) : undefined,
+      sourceCount: Array.isArray(payload.sources) ? payload.sources.length : undefined,
+      sourceTitles: Array.isArray(payload.sources)
+        ? payload.sources.slice(0, 5).map((source) => truncateText(String(source.title ?? ""), 80))
+        : undefined
+    };
+  }
+
+  return {
+    keys: Object.keys(event.payload)
+  };
+}
+
+function summarizeJobResult(kind: AgentJobKind, result: unknown): Record<string, unknown> | null {
+  if (!result || typeof result !== "object") {
+    return null;
+  }
+
+  if (kind === "planning-questions") {
+    const payload = result as {
+      session?: { sessionId?: string; detectedLanguage?: string; detectedDomain?: string; questions?: unknown[] };
+    };
+
+    return {
+      sessionId: payload.session?.sessionId,
+      detectedLanguage: payload.session?.detectedLanguage,
+      detectedDomain: payload.session?.detectedDomain,
+      questionCount: Array.isArray(payload.session?.questions) ? payload.session.questions.length : undefined
+    };
+  }
+
+  if (kind === "planning-plan") {
+    const payload = result as {
+      session?: { sessionId?: string };
+      plan?: { suggestedFirstStepId?: string; steps?: unknown[]; architecture?: unknown[] };
+    };
+
+    return {
+      sessionId: payload.session?.sessionId,
+      suggestedFirstStepId: payload.plan?.suggestedFirstStepId,
+      stepCount: Array.isArray(payload.plan?.steps) ? payload.plan.steps.length : undefined,
+      architectureNodeCount: Array.isArray(payload.plan?.architecture)
+        ? payload.plan.architecture.length
+        : undefined
+    };
+  }
+
+  if (kind === "runtime-guide") {
+    const payload = result as {
+      summary?: string;
+      socraticQuestions?: unknown[];
+      nextAction?: string;
+    };
+
+    return {
+      summary: typeof payload.summary === "string" ? truncateText(payload.summary, 120) : undefined,
+      socraticQuestionCount: Array.isArray(payload.socraticQuestions)
+        ? payload.socraticQuestions.length
+        : undefined,
+      nextAction: typeof payload.nextAction === "string"
+        ? truncateText(payload.nextAction, 120)
+        : undefined
+    };
+  }
+
+  return {
+    keys: Object.keys(result)
+  };
+}
+
+function summarizeStructuredOutput(schemaName: string, response: unknown): Record<string, unknown> {
+  if (!response || typeof response !== "object") {
+    return {
+      schemaName,
+      resultType: typeof response
+    };
+  }
+
+  const payload = response as Record<string, unknown>;
+  return {
+    schemaName,
+    keys: Object.keys(payload),
+    summary: typeof payload.summary === "string" ? truncateText(payload.summary, 120) : undefined,
+    questionCount: Array.isArray(payload.questions) ? payload.questions.length : undefined,
+    stepCount: Array.isArray(payload.steps) ? payload.steps.length : undefined,
+    architectureNodeCount: Array.isArray(payload.architecture) ? payload.architecture.length : undefined,
+    socraticQuestionCount: Array.isArray(payload.socraticQuestions)
+      ? payload.socraticQuestions.length
+      : undefined
   };
 }
 
