@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdtemp, readFile, readdir, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -138,6 +138,120 @@ test("ConstructAgentService creates question and plan jobs and persists the resu
           });
         }
 
+        if (schemaName === "construct_generated_blueprint_bundle") {
+          return schema.parse({
+            projectName: "Rust Compiler Foundations",
+            projectSlug: "rust-compiler-foundations",
+            description: "A generated starter compiler project with learner-owned lexer work.",
+            language: "typescript",
+            entrypoints: ["src/index.ts"],
+            supportFiles: {
+              "package.json": JSON.stringify({
+                name: "@construct/generated-compiler",
+                private: true,
+                type: "module",
+                scripts: {
+                  test: "node ./node_modules/jest/bin/jest.js --runInBand"
+                }
+              }, null, 2),
+              "jest.config.cjs": "module.exports = { testEnvironment: 'node' };\n",
+              "src/index.ts": "export * from './lexer';\n",
+              "src/token.ts": "export type Token = { kind: string; lexeme: string };\n"
+            },
+            canonicalFiles: {
+              "src/lexer.ts": [
+                "import type { Token } from './token';",
+                "",
+                "export function tokenize(source: string): Token[] {",
+                "  return source",
+                "    .split(/\\s+/)",
+                "    .filter(Boolean)",
+                "    .map((lexeme) => ({ kind: 'word', lexeme }));",
+                "}"
+              ].join("\n")
+            },
+            learnerFiles: {
+              "src/lexer.ts": [
+                "import type { Token } from './token';",
+                "",
+                "export function tokenize(source: string): Token[] {",
+                "  // TASK:lexer-tokenize",
+                "  throw new Error('Implement tokenize');",
+                "}"
+              ].join("\n")
+            },
+            hiddenTests: {
+              "tests/lexer.test.ts": [
+                "import { tokenize } from '../src/lexer';",
+                "",
+                "test('tokenize returns lexeme tokens in order', () => {",
+                "  expect(tokenize('int main')).toEqual([",
+                "    { kind: 'word', lexeme: 'int' },",
+                "    { kind: 'word', lexeme: 'main' }",
+                "  ]);",
+                "});"
+              ].join("\n")
+            },
+            steps: [
+              {
+                id: "step.lexer-tokenize",
+                title: "Implement tokenize",
+                summary: "Convert source text into ordered word tokens.",
+                doc: "Start the project by defining the first real lexer behavior.",
+                anchor: {
+                  file: "src/lexer.ts",
+                  marker: "TASK:lexer-tokenize"
+                },
+                tests: ["tests/lexer.test.ts"],
+                concepts: ["tokenization", "array mapping"],
+                constraints: ["Return tokens in source order."],
+                checks: [
+                  {
+                    id: "check.lexer.1",
+                    type: "mcq",
+                    prompt: "Why does token order matter to a parser?",
+                    options: [
+                      {
+                        id: "a",
+                        label: "The parser consumes tokens in sequence."
+                      },
+                      {
+                        id: "b",
+                        label: "It makes tests shorter."
+                      }
+                    ],
+                    answer: "a"
+                  }
+                ],
+                estimatedMinutes: 12,
+                difficulty: "intro"
+              }
+            ],
+            dependencyGraph: {
+              nodes: [
+                {
+                  id: "component.lexer",
+                  label: "Lexer",
+                  kind: "component"
+                },
+                {
+                  id: "skill.tokenization",
+                  label: "Tokenization",
+                  kind: "skill"
+                }
+              ],
+              edges: [
+                {
+                  from: "skill.tokenization",
+                  to: "component.lexer",
+                  reason: "The lexer depends on tokenization rules."
+                }
+              ]
+            },
+            tags: ["compiler", "generated"]
+          });
+        }
+
         if (schemaName === "construct_runtime_guide") {
           return schema.parse({
             summary: "The implementation is close, but the current return path still mutates state in-place.",
@@ -194,6 +308,32 @@ test("ConstructAgentService creates question and plan jobs and persists the resu
     const persistedPlanningState = await service.getCurrentPlanningState();
     assert.ok(persistedPlanningState.session);
     assert.ok(persistedPlanningState.plan);
+
+    const generatedProjectDirectories = await readdir(
+      path.join(root, ".construct", "generated-blueprints")
+    );
+    assert.equal(generatedProjectDirectories.length, 1);
+
+    const generatedBlueprintPath = path.join(
+      root,
+      ".construct",
+      "generated-blueprints",
+      generatedProjectDirectories[0]!,
+      "project-blueprint.json"
+    );
+    const generatedBlueprint = JSON.parse(
+      await readFile(generatedBlueprintPath, "utf8")
+    ) as {
+      files: Record<string, string>;
+      steps: Array<{ id: string }>;
+    };
+    assert.ok(generatedBlueprint.files["src/lexer.ts"]);
+    assert.equal(generatedBlueprint.steps[0]?.id, "step.lexer-tokenize");
+
+    const activeBlueprintState = JSON.parse(
+      await readFile(path.join(root, ".construct", "state", "active-blueprint.json"), "utf8")
+    ) as { blueprintPath: string };
+    assert.equal(activeBlueprintState.blueprintPath, generatedBlueprintPath);
 
     const knowledgeBaseRaw = await readFile(
       path.join(root, ".construct", "state", "user-knowledge.json"),

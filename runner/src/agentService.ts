@@ -1,7 +1,7 @@
 import type http from "node:http";
 import { randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 
 import { Annotation, END, START, StateGraph } from "@langchain/langgraph";
@@ -10,7 +10,9 @@ import {
   AgentEventSchema,
   AgentJobCreatedResponseSchema,
   AgentJobSnapshotSchema,
+  BlueprintStepSchema,
   CurrentPlanningSessionResponseSchema,
+  DependencyGraphSchema,
   GeneratedProjectPlanSchema,
   KnowledgeGraphSchema,
   PlanningQuestionSchema,
@@ -19,6 +21,7 @@ import {
   PlanningSessionSchema,
   PlanningSessionStartRequestSchema,
   PlanningSessionStartResponseSchema,
+  ProjectBlueprintSchema,
   RuntimeGuideRequestSchema,
   RuntimeGuideResponseSchema,
   UserKnowledgeBaseSchema,
@@ -37,6 +40,7 @@ import {
   type PlanningSessionCompleteResponse,
   type PlanningSessionStartRequest,
   type PlanningSessionStartResponse,
+  type ProjectBlueprint,
   type RuntimeGuideRequest,
   type RuntimeGuideResponse,
   type StoredKnowledgeConcept,
@@ -45,6 +49,8 @@ import {
 } from "@construct/shared";
 import { tavily } from "@tavily/core";
 import { z } from "zod";
+
+import { setActiveBlueprintPath } from "./activeBlueprint";
 
 type PlanningStateFile = {
   session: PlanningSession | null;
@@ -131,6 +137,7 @@ type PlanGraphState = {
   knowledgeBase: UserKnowledgeBase;
   research: ResearchDigest | null;
   plan: GeneratedProjectPlan | null;
+  activeBlueprintPath: string | null;
 };
 
 type RuntimeGuideGraphState = {
@@ -183,6 +190,29 @@ const GENERATED_PROJECT_PLAN_DRAFT_SCHEMA = z.object({
   suggestedFirstStepId: z.string().min(1)
 });
 
+const FILE_CONTENTS_SCHEMA = z.record(z.string().min(1));
+const NON_EMPTY_FILE_CONTENTS_SCHEMA = FILE_CONTENTS_SCHEMA.refine(
+  (files) => Object.keys(files).length > 0,
+  {
+    message: "At least one file is required."
+  }
+);
+
+const GENERATED_BLUEPRINT_BUNDLE_DRAFT_SCHEMA = z.object({
+  projectName: z.string().min(1),
+  projectSlug: z.string().min(1),
+  description: z.string().min(1),
+  language: z.string().min(1),
+  entrypoints: z.array(z.string().min(1)).min(1).max(5),
+  supportFiles: FILE_CONTENTS_SCHEMA.default({}),
+  canonicalFiles: NON_EMPTY_FILE_CONTENTS_SCHEMA,
+  learnerFiles: NON_EMPTY_FILE_CONTENTS_SCHEMA,
+  hiddenTests: NON_EMPTY_FILE_CONTENTS_SCHEMA,
+  steps: z.array(BlueprintStepSchema).min(1),
+  dependencyGraph: DependencyGraphSchema,
+  tags: z.array(z.string().min(1)).default([])
+});
+
 const CONFIDENCE_OPTIONS = [
   {
     id: "comfortable",
@@ -205,9 +235,11 @@ const CONFIDENCE_OPTIONS = [
 ] as const;
 
 export class ConstructAgentService {
+  private readonly rootDirectory: string;
   private readonly statePath: string;
   private readonly knowledgeBasePath: string;
   private readonly generatedPlansDirectory: string;
+  private readonly generatedBlueprintsDirectory: string;
   private readonly now: () => Date;
   private readonly llm: StructuredLanguageModel;
   private readonly search: SearchProvider;
@@ -218,6 +250,7 @@ export class ConstructAgentService {
     rootDirectory: string,
     dependencies: AgentDependencies = {}
   ) {
+    this.rootDirectory = rootDirectory;
     this.statePath = path.join(rootDirectory, ".construct", "state", "agent-planner.json");
     this.knowledgeBasePath = path.join(
       rootDirectory,
@@ -229,6 +262,11 @@ export class ConstructAgentService {
       rootDirectory,
       ".construct",
       "generated-plans"
+    );
+    this.generatedBlueprintsDirectory = path.join(
+      rootDirectory,
+      ".construct",
+      "generated-blueprints"
     );
     this.now = dependencies.now ?? (() => new Date());
     this.logger = dependencies.logger ?? createConsoleAgentLogger();
@@ -645,7 +683,8 @@ export class ConstructAgentService {
       session: Annotation<PlanningSession>(),
       knowledgeBase: Annotation<UserKnowledgeBase>(),
       research: Annotation<ResearchDigest | null>(),
-      plan: Annotation<GeneratedProjectPlan | null>()
+      plan: Annotation<GeneratedProjectPlan | null>(),
+      activeBlueprintPath: Annotation<string | null>()
     });
 
     const graph = new StateGraph(StateAnnotation)
@@ -692,10 +731,39 @@ export class ConstructAgentService {
           return plan;
         })
       }))
+      .addNode("generateBlueprint", async (state) => ({
+        activeBlueprintPath: await this.withStage(jobId, "blueprint-generation", "Generating the runnable project blueprint", "Construct is generating the canonical project, masked learner files, and hidden tests for the personalized path.", async () => {
+          if (!state.plan) {
+            throw new Error("Cannot generate a blueprint before the project plan exists.");
+          }
+
+          const bundleDraft = await this.llm.parse({
+            schema: GENERATED_BLUEPRINT_BUNDLE_DRAFT_SCHEMA,
+            schemaName: "construct_generated_blueprint_bundle",
+            instructions: buildBlueprintGenerationInstructions(),
+            prompt: JSON.stringify(
+              {
+                session: state.session,
+                answers: state.request.answers,
+                plan: state.plan,
+                priorKnowledge: compactKnowledgeBase(state.knowledgeBase),
+                research: compactResearchDigest(state.research)
+              },
+              null,
+              2
+            ),
+            maxOutputTokens: 20_000,
+            verbosity: "medium"
+          });
+
+          return this.persistGeneratedBlueprint(state.session, state.plan, bundleDraft);
+        })
+      }))
       .addEdge(START, "loadKnowledgeBase")
       .addEdge("loadKnowledgeBase", "researchArchitecture")
       .addEdge("researchArchitecture", "generatePlan")
-      .addEdge("generatePlan", END)
+      .addEdge("generatePlan", "generateBlueprint")
+      .addEdge("generateBlueprint", END)
       .compile();
 
     const result = await graph.invoke({
@@ -704,7 +772,8 @@ export class ConstructAgentService {
       session,
       knowledgeBase: emptyKnowledgeBase(this.now),
       research: null,
-      plan: null
+      plan: null,
+      activeBlueprintPath: null
     });
 
     return PlanningSessionCompleteResponseSchema.parse({
@@ -859,6 +928,72 @@ export class ConstructAgentService {
     });
   }
 
+  private async persistGeneratedBlueprint(
+    session: PlanningSession,
+    plan: GeneratedProjectPlan,
+    draft: z.infer<typeof GENERATED_BLUEPRINT_BUNDLE_DRAFT_SCHEMA>
+  ): Promise<string> {
+    const projectSlug = slugify(draft.projectSlug || draft.projectName || session.goal) || "generated-project";
+    const projectRoot = path.join(
+      this.generatedBlueprintsDirectory,
+      `${session.sessionId}-${projectSlug}`
+    );
+    const blueprintPath = path.join(projectRoot, "project-blueprint.json");
+
+    await rm(projectRoot, { recursive: true, force: true });
+    await mkdir(projectRoot, { recursive: true });
+
+    await this.writeProjectFiles(projectRoot, draft.supportFiles);
+    await this.writeProjectFiles(projectRoot, draft.canonicalFiles);
+    await this.writeProjectFiles(projectRoot, draft.hiddenTests);
+
+    const blueprint: ProjectBlueprint = ProjectBlueprintSchema.parse({
+      id: `construct.generated.${session.sessionId}.${projectSlug}`,
+      name: draft.projectName,
+      version: "0.1.0",
+      description: draft.description,
+      projectRoot,
+      sourceProjectRoot: projectRoot,
+      language: draft.language,
+      entrypoints: draft.entrypoints,
+      files: draft.learnerFiles,
+      steps: draft.steps,
+      dependencyGraph: draft.dependencyGraph,
+      metadata: {
+        createdBy: "Construct Architect agent",
+        createdAt: this.now().toISOString(),
+        targetLanguage: draft.language,
+        tags: Array.from(new Set([
+          ...draft.tags,
+          session.detectedDomain,
+          session.detectedLanguage,
+          "agent-generated"
+        ]))
+      }
+    });
+
+    await writeFile(blueprintPath, `${JSON.stringify(blueprint, null, 2)}\n`, "utf8");
+    await setActiveBlueprintPath({
+      rootDirectory: this.rootDirectory,
+      blueprintPath,
+      sessionId: session.sessionId,
+      now: this.now
+    });
+    this.logger.info("Persisted generated blueprint and activated it.", {
+      sessionId: session.sessionId,
+      blueprintPath,
+      projectRoot,
+      goal: session.goal,
+      stepCount: blueprint.steps.length,
+      canonicalFileCount: Object.keys(draft.canonicalFiles).length,
+      learnerFileCount: Object.keys(draft.learnerFiles).length,
+      hiddenTestCount: Object.keys(draft.hiddenTests).length,
+      suggestedFirstStepId: plan.suggestedFirstStepId
+    });
+
+    return blueprintPath;
+  }
+
   private async persistPlanningArtifacts(
     session: PlanningSession,
     plan: GeneratedProjectPlan
@@ -872,6 +1007,17 @@ export class ConstructAgentService {
       stepCount: plan.steps.length,
       architectureNodeCount: plan.architecture.length
     });
+  }
+
+  private async writeProjectFiles(
+    projectRoot: string,
+    files: Record<string, string>
+  ): Promise<void> {
+    for (const [relativePath, contents] of Object.entries(files)) {
+      const destinationPath = path.join(projectRoot, relativePath);
+      await mkdir(path.dirname(destinationPath), { recursive: true });
+      await writeFile(destinationPath, contents, "utf8");
+    }
   }
 
   private async readPlanningState(): Promise<PlanningStateFile> {
@@ -1273,6 +1419,9 @@ function summarizeStructuredOutput(schemaName: string, response: unknown): Recor
     questionCount: Array.isArray(payload.questions) ? payload.questions.length : undefined,
     stepCount: Array.isArray(payload.steps) ? payload.steps.length : undefined,
     architectureNodeCount: Array.isArray(payload.architecture) ? payload.architecture.length : undefined,
+    canonicalFileCount: isRecord(payload.canonicalFiles) ? Object.keys(payload.canonicalFiles).length : undefined,
+    learnerFileCount: isRecord(payload.learnerFiles) ? Object.keys(payload.learnerFiles).length : undefined,
+    hiddenTestCount: isRecord(payload.hiddenTests) ? Object.keys(payload.hiddenTests).length : undefined,
     socraticQuestionCount: Array.isArray(payload.socraticQuestions)
       ? payload.socraticQuestions.length
       : undefined
@@ -1365,6 +1514,10 @@ function slugify(value: string): string {
     .replace(/^-+|-+$/g, "");
 }
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+
 function buildQuestionGenerationInstructions(): string {
   return [
     "You are Construct's Architect agent.",
@@ -1390,6 +1543,23 @@ function buildPlanGenerationInstructions(): string {
     "If the learner is weak in a prerequisite concept, insert a skill step immediately before the implementation step that needs it.",
     "Do not produce toy exercises disconnected from the project.",
     "Suggested first step must reference one of the generated steps."
+  ].join("\n");
+}
+
+function buildBlueprintGenerationInstructions(): string {
+  return [
+    "You are Construct's Architect agent.",
+    "Generate a real project blueprint for the learner to implement in-place.",
+    "Return a runnable canonical project split into supportFiles, canonicalFiles, learnerFiles, and hiddenTests.",
+    "supportFiles are unmasked project files such as package.json, tsconfig, helper modules, and fixed runtime scaffolding.",
+    "canonicalFiles are the solved versions of the learner-owned implementation files.",
+    "learnerFiles must correspond to the same file paths as canonicalFiles, but with focused TASK markers and incomplete implementations the learner must fill in.",
+    "hiddenTests must validate the learner tasks and stay runnable without exposing full solutions in the learnerFiles.",
+    "Every step must point to a real learnerFile anchor and include doc text, comprehension checks, constraints, and targeted tests.",
+    "Prefer a small but real project scope that can be completed in 3 to 6 steps.",
+    "Choose build order from true project dependencies and the learner profile, not a generic tutorial order.",
+    "For TypeScript and JavaScript projects, generate Jest tests and the minimum package/tooling files required to run them.",
+    "Do not emit placeholder prose instead of code. Return concrete file contents."
   ].join("\n");
 }
 

@@ -21,7 +21,7 @@ This file tracks the implementation phases, current status, shipped scope, and v
 | 5 | Learning Surface & Guidance Console | Implemented | Each unit now opens in a technical brief with quick checks, then transitions into a focused execution mode with a persistent guidance console, deterministic hints, and targeted task submission. |
 | 6 | Task lifecycle & telemetry | Implemented | Pre-task snapshots, persisted task attempts, learner-model updates, telemetry submission, renderer-side task lifecycle wiring, and the compact native IDE shell pass are in place. |
 | 7 | Edit tracking & anti-cheat | Implemented | Typed-versus-pasted telemetry is enforced through a rewrite gate, and the learner now works inside a materialized starter workspace where internal step tests stay hidden from the explorer. |
-| 8 | Live Guide orchestration & LLM integration | In progress | Real agent foundations are now live: LangGraph job orchestration, the LangChain OpenAI provider, Tavily-backed research, SSE activity streaming, persisted user knowledge, prompt compaction for structured plan generation, and a runtime Guide endpoint. Full arbitrary codebase emission and generated blueprint synthesis are still pending. |
+| 8 | Live Guide orchestration & LLM integration | In progress | Real agent foundations are now live: LangGraph job orchestration, the LangChain OpenAI provider, Tavily-backed research, SSE activity streaming, persisted user knowledge, prompt compaction for structured plan generation, runtime Guide responses, and first-slice generated blueprint synthesis. The runner now swaps onto the active agent-generated blueprint instead of only the fixed sample. Dynamic plan mutation after runtime struggle is still pending. |
 | 9 | Architect static generator | Pending | Not started. |
 | 10 | Rollback UX & snapshot management | Pending | Not started. |
 | 11 | Multi-language adapters | Pending | Not started. |
@@ -36,6 +36,8 @@ This file tracks the implementation phases, current status, shipped scope, and v
 - Add LangGraph-backed planning/runtime graphs for question generation, personalized roadmap generation, and live runtime guidance.
 - Add SSE job streaming so the renderer can show what the agent is doing while it researches and plans.
 - Add detailed runner-side agent logging so the server logs mirror job lifecycle, stage events, research activity, model invocations, and completion or failure summaries.
+- Add first-slice agent-generated blueprint synthesis so planning now produces a canonical project directory, masked learner files, hidden tests, and step docs/checks that the app can load directly.
+- Replace the fixed runtime sample as the always-active workspace by letting the runner resolve and materialize the latest generated blueprint on demand.
 - Persist a user knowledge base derived from prior planning sessions and feed it back into future question generation and roadmap synthesis.
 - Replace static “Ask guide” behavior with a real runtime Guide request that analyzes the current anchored code, constraints, and latest task result.
 
@@ -73,6 +75,8 @@ This file tracks the implementation phases, current status, shipped scope, and v
 - Phase 8 planner coverage: [`/Users/abhinavmishra/solin/socrates/runner/src/agentPlanner.test.ts`](/Users/abhinavmishra/solin/socrates/runner/src/agentPlanner.test.ts).
 - Phase 8 planning UI integration: [`/Users/abhinavmishra/solin/socrates/app/src/renderer/App.tsx`](/Users/abhinavmishra/solin/socrates/app/src/renderer/App.tsx), [`/Users/abhinavmishra/solin/socrates/app/src/renderer/index.css`](/Users/abhinavmishra/solin/socrates/app/src/renderer/index.css), [`/Users/abhinavmishra/solin/socrates/app/src/renderer/lib/api.ts`](/Users/abhinavmishra/solin/socrates/app/src/renderer/lib/api.ts), and [`/Users/abhinavmishra/solin/socrates/app/src/renderer/types.ts`](/Users/abhinavmishra/solin/socrates/app/src/renderer/types.ts).
 - Phase 8 real agent orchestration: [`/Users/abhinavmishra/solin/socrates/runner/src/agentService.ts`](/Users/abhinavmishra/solin/socrates/runner/src/agentService.ts).
+- Phase 8 active-blueprint selection and runner workspace switching: [`/Users/abhinavmishra/solin/socrates/runner/src/activeBlueprint.ts`](/Users/abhinavmishra/solin/socrates/runner/src/activeBlueprint.ts) and [`/Users/abhinavmishra/solin/socrates/runner/src/index.ts`](/Users/abhinavmishra/solin/socrates/runner/src/index.ts).
+- Phase 8 generated blueprint regression coverage: [`/Users/abhinavmishra/solin/socrates/runner/src/agentService.test.ts`](/Users/abhinavmishra/solin/socrates/runner/src/agentService.test.ts).
 - Phase 8 real agent coverage: [`/Users/abhinavmishra/solin/socrates/runner/src/agentService.test.ts`](/Users/abhinavmishra/solin/socrates/runner/src/agentService.test.ts).
 - Phase 8 runner job/SSE endpoints: [`/Users/abhinavmishra/solin/socrates/runner/src/index.ts`](/Users/abhinavmishra/solin/socrates/runner/src/index.ts).
 - Phase 8 shared job, knowledge-base, and runtime-guide contracts: [`/Users/abhinavmishra/solin/socrates/pkg/shared/src/agentSchemas.ts`](/Users/abhinavmishra/solin/socrates/pkg/shared/src/agentSchemas.ts).
@@ -115,6 +119,7 @@ This file tracks the implementation phases, current status, shipped scope, and v
 - Passed: Node `v25.4.0` verification sweep covering shared typecheck/build, runner typecheck/test/task execution/build, and app typecheck/build/test.
 - Passed: LangChain OpenAI provider migration verification through `pnpm install`, `PATH="$HOME/.nvm/versions/node/v25.4.0/bin:$PATH" pnpm --filter @construct/runner typecheck`, `PATH="$HOME/.nvm/versions/node/v25.4.0/bin:$PATH" pnpm --filter @construct/runner build`, and `PATH="$HOME/.nvm/versions/node/v25.4.0/bin:$PATH" pnpm --filter @construct/runner test`.
 - Passed: detailed agent logging verification through `PATH="$HOME/.nvm/versions/node/v25.4.0/bin:$PATH" pnpm --filter @construct/runner typecheck` and `PATH="$HOME/.nvm/versions/node/v25.4.0/bin:$PATH" pnpm --filter @construct/runner test`.
+- Passed: generated-blueprint activation verification through `PATH="$HOME/.nvm/versions/node/v25.4.0/bin:$PATH" pnpm --filter @construct/runner typecheck`, `PATH="$HOME/.nvm/versions/node/v25.4.0/bin:$PATH" pnpm --filter @construct/runner test`, `PATH="$HOME/.nvm/versions/node/v25.4.0/bin:$PATH" pnpm --filter @construct/runner build`, `pnpm --filter @construct/app typecheck`, and `pnpm --filter @construct/app build`.
 - Passed: learner-workspace sanity check confirmed the visible explorer surface excludes `tests/` and the materialized [`/Users/abhinavmishra/solin/socrates/blueprints/workflow-runtime/.construct/workspaces/construct.workflow-runtime.v1/src/state.ts`](/Users/abhinavmishra/solin/socrates/blueprints/workflow-runtime/.construct/workspaces/construct.workflow-runtime.v1/src/state.ts) contains the starter `throw new Error('Implement mergeState')` implementation instead of the canonical solved code.
 - Note: the default shell runtime in this workspace still points at Node `v20.19.5`, so Phase 7 verification currently relies on switching to a newer local Node with `node:sqlite` support.
 - Not run in this sandbox: a bind-based smoke test for the HTTP endpoint, because local listen attempts from the test process hit `EPERM`.
@@ -122,10 +127,10 @@ This file tracks the implementation phases, current status, shipped scope, and v
 
 ## Blockers
 
-- The agent foundation is real now, but Construct still does not yet emit a canonical runnable codebase and masked learner blueprint for arbitrary goals. Phase 8 currently stops at provider-backed planning, knowledge profiling, research, SSE activity streaming, and runtime guidance.
+- Construct now emits a first-slice generated blueprint bundle for arbitrary goals, but the output quality still depends on a single Architect generation pass and does not yet include repair loops, schema retries for bundle content, or project execution smoke tests of the generated artifact before activation.
 - The current agent fix hardens structured plan generation by compacting learner/history/research context before asking for a schema-constrained roadmap, but we still need explicit retry/fallback handling when model output does not satisfy the schema on the first attempt.
 - The real agent stack requires `OPENAI_API_KEY` and `TAVILY_API_KEY` in the runner environment. Provider choice remains developer-controlled through environment configuration, not end-user UI.
 
 ## Next Phase
 
-Continue Phase 8 by taking the new agent output and turning it into real generated artifacts: canonical project synthesis, masking, hidden per-step tests, and blueprint emission that the learner can enter immediately after planning.
+Continue Phase 8 by hardening the new generated-blueprint path: add generation retries and validation repair loops, run pre-activation smoke tests on generated projects, and start persisting runtime step mutations back into the active blueprint instead of treating it as fixed after generation.

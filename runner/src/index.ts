@@ -23,6 +23,10 @@ import {
   TestRunnerManager,
   loadBlueprint
 } from "./testRunner";
+import {
+  getActiveBlueprintPath,
+  getDefaultBlueprintPath
+} from "./activeBlueprint";
 import { prepareLearnerWorkspace } from "./workspaceMaterializer";
 
 const rootDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
@@ -30,26 +34,10 @@ loadRunnerEnvironment(rootDir);
 
 const port = Number(process.env.CONSTRUCT_RUNNER_PORT ?? 43110);
 const testRunner = new TestRunnerManager();
-const canonicalBlueprintPath = path.join(
-  rootDir,
-  "blueprints",
-  "workflow-runtime",
-  "project-blueprint.json"
-);
-const preparedWorkspace = await prepareLearnerWorkspace(canonicalBlueprintPath);
-const learnerBlueprintPath = preparedWorkspace.learnerBlueprintPath;
-const workspaceRoot = preparedWorkspace.learnerWorkspaceRoot;
-const workspaceFileManager = new WorkspaceFileManager(workspaceRoot, {
-  ignoredDirectories: ["test-fixtures", "tests", "__tests__"],
-  ignoredFiles: ["project-blueprint.json"]
-});
-const snapshotService = new SnapshotService(workspaceRoot);
 const agentPlanner = new AgentPlannerService(rootDir);
-const taskLifecycle = new TaskLifecycleService(workspaceRoot, {
-  snapshotService,
-  testRunner
-});
 let constructAgent: ConstructAgentService | null = null;
+let workspaceContextPromise: Promise<WorkspaceContext> | null = null;
+let workspaceContextBlueprintPath = "";
 
 function getConstructAgent(): ConstructAgentService {
   if (!constructAgent) {
@@ -57,6 +45,52 @@ function getConstructAgent(): ConstructAgentService {
   }
 
   return constructAgent;
+}
+
+type WorkspaceContext = {
+  canonicalBlueprintPath: string;
+  learnerBlueprintPath: string;
+  workspaceRoot: string;
+  workspaceFileManager: WorkspaceFileManager;
+  taskLifecycle: TaskLifecycleService;
+};
+
+async function getWorkspaceContext(): Promise<WorkspaceContext> {
+  const canonicalBlueprintPath = await getActiveBlueprintPath(rootDir);
+
+  if (
+    workspaceContextPromise &&
+    workspaceContextBlueprintPath === canonicalBlueprintPath
+  ) {
+    return workspaceContextPromise;
+  }
+
+  workspaceContextBlueprintPath = canonicalBlueprintPath;
+  workspaceContextPromise = createWorkspaceContext(canonicalBlueprintPath);
+  return workspaceContextPromise;
+}
+
+async function createWorkspaceContext(
+  canonicalBlueprintPath: string
+): Promise<WorkspaceContext> {
+  const preparedWorkspace = await prepareLearnerWorkspace(canonicalBlueprintPath);
+  const workspaceFileManager = new WorkspaceFileManager(preparedWorkspace.learnerWorkspaceRoot, {
+    ignoredDirectories: ["test-fixtures", "tests", "__tests__"],
+    ignoredFiles: ["project-blueprint.json"]
+  });
+  const snapshotService = new SnapshotService(preparedWorkspace.learnerWorkspaceRoot);
+  const taskLifecycle = new TaskLifecycleService(preparedWorkspace.learnerWorkspaceRoot, {
+    snapshotService,
+    testRunner
+  });
+
+  return {
+    canonicalBlueprintPath,
+    learnerBlueprintPath: preparedWorkspace.learnerBlueprintPath,
+    workspaceRoot: preparedWorkspace.learnerWorkspaceRoot,
+    workspaceFileManager,
+    taskLifecycle
+  };
 }
 
 const server = http.createServer(async (request, response) => {
@@ -110,26 +144,30 @@ const server = http.createServer(async (request, response) => {
     }
 
     if (request.method === "GET" && request.url === "/blueprint/current") {
-      const blueprint = await loadBlueprint(learnerBlueprintPath);
+      const workspaceContext = await getWorkspaceContext();
+      const blueprint = await loadBlueprint(workspaceContext.learnerBlueprintPath);
 
       response.writeHead(200, { "Content-Type": "application/json" });
       response.end(
         JSON.stringify({
           blueprint,
-          workspaceRoot,
-          blueprintPath: learnerBlueprintPath
+          workspaceRoot: workspaceContext.workspaceRoot,
+          blueprintPath: workspaceContext.learnerBlueprintPath,
+          canonicalBlueprintPath: workspaceContext.canonicalBlueprintPath,
+          defaultBlueprintPath: getDefaultBlueprintPath(rootDir)
         })
       );
       return;
     }
 
     if (request.method === "GET" && request.url?.startsWith("/workspace/files")) {
-      const files = await workspaceFileManager.listFiles();
+      const workspaceContext = await getWorkspaceContext();
+      const files = await workspaceContext.workspaceFileManager.listFiles();
 
       response.writeHead(200, { "Content-Type": "application/json" });
       response.end(
         JSON.stringify({
-          root: workspaceRoot,
+          root: workspaceContext.workspaceRoot,
           files
         })
       );
@@ -137,8 +175,9 @@ const server = http.createServer(async (request, response) => {
     }
 
     if (request.method === "GET" && request.url?.startsWith("/workspace/file")) {
+      const workspaceContext = await getWorkspaceContext();
       const relativePath = getRequiredQueryParam(request.url, "path");
-      const content = await workspaceFileManager.readFile(relativePath);
+      const content = await workspaceContext.workspaceFileManager.readFile(relativePath);
 
       response.writeHead(200, { "Content-Type": "application/json" });
       response.end(
@@ -201,6 +240,7 @@ const server = http.createServer(async (request, response) => {
     }
 
     if (request.method === "POST" && request.url === "/workspace/file") {
+      const workspaceContext = await getWorkspaceContext();
       const body = JSON.parse(await readRequestBody(request)) as {
         path?: string;
         content?: string;
@@ -210,7 +250,7 @@ const server = http.createServer(async (request, response) => {
         throw new Error("A workspace path and string content are required.");
       }
 
-      await workspaceFileManager.writeFile(body.path, body.content);
+      await workspaceContext.workspaceFileManager.writeFile(body.path, body.content);
 
       response.writeHead(200, { "Content-Type": "application/json" });
       response.end(
@@ -233,9 +273,10 @@ const server = http.createServer(async (request, response) => {
     }
 
     if (request.method === "POST" && request.url === "/tasks/start") {
+      const workspaceContext = await getWorkspaceContext();
       const body = await readRequestBody(request);
       const startRequest = TaskStartRequestSchema.parse(JSON.parse(body));
-      const taskSession = await taskLifecycle.startTask(startRequest);
+      const taskSession = await workspaceContext.taskLifecycle.startTask(startRequest);
 
       response.writeHead(200, { "Content-Type": "application/json" });
       response.end(JSON.stringify(taskSession));
@@ -243,9 +284,10 @@ const server = http.createServer(async (request, response) => {
     }
 
     if (request.method === "POST" && request.url === "/tasks/submit") {
+      const workspaceContext = await getWorkspaceContext();
       const body = await readRequestBody(request);
       const submitRequest = TaskSubmitRequestSchema.parse(JSON.parse(body));
-      const taskSubmission = await taskLifecycle.submitTask(submitRequest);
+      const taskSubmission = await workspaceContext.taskLifecycle.submitTask(submitRequest);
 
       response.writeHead(200, { "Content-Type": "application/json" });
       response.end(JSON.stringify(taskSubmission));
@@ -253,8 +295,12 @@ const server = http.createServer(async (request, response) => {
     }
 
     if (request.method === "GET" && request.url?.startsWith("/tasks/progress")) {
+      const workspaceContext = await getWorkspaceContext();
       const stepId = getRequiredQueryParam(request.url, "stepId");
-      const progress = await taskLifecycle.getTaskProgress(stepId, learnerBlueprintPath);
+      const progress = await workspaceContext.taskLifecycle.getTaskProgress(
+        stepId,
+        workspaceContext.learnerBlueprintPath
+      );
 
       response.writeHead(200, { "Content-Type": "application/json" });
       response.end(JSON.stringify(progress));
@@ -262,8 +308,9 @@ const server = http.createServer(async (request, response) => {
     }
 
     if (request.method === "GET" && request.url === "/learner/model") {
+      const workspaceContext = await getWorkspaceContext();
       response.writeHead(200, { "Content-Type": "application/json" });
-      response.end(JSON.stringify(await taskLifecycle.getLearnerModel()));
+      response.end(JSON.stringify(await workspaceContext.taskLifecycle.getLearnerModel()));
       return;
     }
 

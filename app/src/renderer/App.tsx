@@ -675,9 +675,23 @@ export default function App() {
 
       setPlanningSession(completed.session);
       setPlanningPlan(completed.plan);
+      const [blueprintEnvelope, filesEnvelope, learner] = await Promise.all([
+        fetchBlueprint(),
+        fetchWorkspaceFiles(),
+        fetchLearnerModel()
+      ]);
+      setBlueprint(blueprintEnvelope.blueprint);
+      setBlueprintPath(blueprintEnvelope.blueprintPath);
+      setWorkspaceFiles(filesEnvelope.files);
+      setLearnerModel(learner);
+      resetTaskTelemetry();
+      const firstGeneratedStep = blueprintEnvelope.blueprint.steps[0];
+      if (firstGeneratedStep) {
+        await openFile(firstGeneratedStep.anchor.file, firstGeneratedStep);
+      }
       setPlanningOverlayOpen(true);
       setStatusMessage(
-        `Generated a ${completed.plan.steps.length}-step personalized plan for ${completed.plan.goal}.`
+        `Generated a ${completed.plan.steps.length}-step blueprint for ${completed.plan.goal}.`
       );
     } catch (error) {
       setPlanningError(
