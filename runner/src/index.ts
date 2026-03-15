@@ -25,9 +25,11 @@ import {
 } from "./testRunner";
 import { prepareLearnerWorkspace } from "./workspaceMaterializer";
 
+const rootDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
+loadRunnerEnvironment(rootDir);
+
 const port = Number(process.env.CONSTRUCT_RUNNER_PORT ?? 43110);
 const testRunner = new TestRunnerManager();
-const rootDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
 const canonicalBlueprintPath = path.join(
   rootDir,
   "blueprints",
@@ -317,4 +319,26 @@ function getRequiredQueryParam(requestUrl: string, key: string): string {
   }
 
   return value;
+}
+
+function loadRunnerEnvironment(projectRoot: string): void {
+  if (typeof process.loadEnvFile !== "function") {
+    return;
+  }
+
+  for (const fileName of [".env", ".env.local"]) {
+    const envPath = path.join(projectRoot, fileName);
+
+    try {
+      process.loadEnvFile(envPath);
+    } catch (error) {
+      if (
+        !(error instanceof Error) ||
+        !("code" in error) ||
+        (error as NodeJS.ErrnoException).code !== "ENOENT"
+      ) {
+        console.warn(`[construct-runner] Failed to load ${fileName}`, error);
+      }
+    }
+  }
 }
