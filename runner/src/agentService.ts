@@ -59,6 +59,7 @@ import {
   getActiveBlueprintPath as getActiveBlueprintPathFromFile,
   setActiveBlueprintPath
 } from "./activeBlueprint";
+import { zodToJsonSchema } from "zod-to-json-schema";
 
 type PlanningStateFile = {
   session: PlanningSession | null;
@@ -125,6 +126,20 @@ type StructuredLanguageModel = {
     maxOutputTokens?: number;
     verbosity?: "low" | "medium" | "high";
   }): Promise<z.infer<T>>;
+};
+
+type LanguageModelMessage = [role: "system" | "user", content: string];
+
+type LanguageModelClient = {
+  withStructuredOutput<T extends z.ZodTypeAny>(
+    schema: T,
+    options: { name: string; method: "jsonSchema" }
+  ): {
+    invoke(messages: LanguageModelMessage[]): Promise<unknown>;
+  };
+  invoke(messages: LanguageModelMessage[]): Promise<{
+    content: unknown;
+  }>;
 };
 
 type SearchProvider = {
@@ -1265,21 +1280,29 @@ export class ConstructAgentService {
   }
 }
 
-class OpenAIStructuredLanguageModel implements StructuredLanguageModel {
-  private readonly client: ChatOpenAI;
+export class OpenAIStructuredLanguageModel implements StructuredLanguageModel {
+  private readonly client: LanguageModelClient;
   private readonly model: string;
   private readonly logger: AgentLogger;
 
-  constructor(input: { apiKey: string; baseUrl?: string; model: string; logger: AgentLogger }) {
-    this.client = new ChatOpenAI({
-      apiKey: input.apiKey,
-      model: input.model,
-      configuration: input.baseUrl
-        ? {
-            baseURL: input.baseUrl
-          }
-        : undefined
-    });
+  constructor(input: {
+    apiKey: string;
+    baseUrl?: string;
+    model: string;
+    logger: AgentLogger;
+    client?: LanguageModelClient;
+  }) {
+    this.client =
+      input.client ??
+      new ChatOpenAI({
+        apiKey: input.apiKey,
+        model: input.model,
+        configuration: input.baseUrl
+          ? {
+              baseURL: input.baseUrl
+            }
+          : undefined
+      });
     this.model = input.model;
     this.logger = input.logger;
   }
@@ -1300,6 +1323,85 @@ class OpenAIStructuredLanguageModel implements StructuredLanguageModel {
       maxOutputTokens: input.maxOutputTokens ?? 4_000,
       verbosity: input.verbosity ?? "medium"
     });
+    let lastError: Error | null = null;
+
+    for (let attempt = 1; attempt <= 2; attempt += 1) {
+      try {
+        const parsed = await this.invokeStructuredResponse(input);
+        this.logger.info("Completed OpenAI structured generation.", {
+          model: this.model,
+          schemaName: input.schemaName,
+          durationMs: Date.now() - startedAt,
+          attempt,
+          mode: "structured",
+          response: summarizeStructuredOutput(input.schemaName, parsed)
+        });
+        return parsed;
+      } catch (error) {
+        lastError = toError(error);
+
+        if (isStructuredOutputSchemaCompatibilityError(lastError)) {
+          this.logger.warn("Structured output schema was incompatible. Retrying with JSON fallback.", {
+            model: this.model,
+            schemaName: input.schemaName,
+            attempt,
+            error: lastError.message
+          });
+          break;
+        }
+
+        if (attempt >= 2 || !isRetryableModelError(lastError)) {
+          throw lastError;
+        }
+
+        this.logger.warn("Structured generation failed. Retrying request.", {
+          model: this.model,
+          schemaName: input.schemaName,
+          attempt,
+          error: lastError.message
+        });
+      }
+    }
+
+    for (let attempt = 1; attempt <= 2; attempt += 1) {
+      try {
+        const parsed = await this.invokeJsonFallback(input);
+        this.logger.info("Completed OpenAI structured generation.", {
+          model: this.model,
+          schemaName: input.schemaName,
+          durationMs: Date.now() - startedAt,
+          attempt,
+          mode: "json-fallback",
+          response: summarizeStructuredOutput(input.schemaName, parsed)
+        });
+        return parsed;
+      } catch (error) {
+        lastError = toError(error);
+
+        if (attempt >= 2) {
+          throw lastError;
+        }
+
+        this.logger.warn("JSON fallback generation failed. Retrying request.", {
+          model: this.model,
+          schemaName: input.schemaName,
+          attempt,
+          error: lastError.message
+        });
+      }
+    }
+
+    throw lastError ?? new Error("Structured generation failed.");
+  }
+
+  private async invokeStructuredResponse<T extends z.ZodTypeAny>(input: {
+    schema: T;
+    schemaName: string;
+    instructions: string;
+    prompt: string;
+    maxOutputTokens?: number;
+    verbosity?: "low" | "medium" | "high";
+  }): Promise<z.infer<T>> {
     const structuredModel = this.client.withStructuredOutput(input.schema, {
       name: input.schemaName,
       method: "jsonSchema"
@@ -1316,14 +1418,37 @@ class OpenAIStructuredLanguageModel implements StructuredLanguageModel {
       ],
       ["user", input.prompt]
     ]);
-    const parsed = input.schema.parse(response);
-    this.logger.info("Completed OpenAI structured generation.", {
-      model: this.model,
-      schemaName: input.schemaName,
-      durationMs: Date.now() - startedAt,
-      response: summarizeStructuredOutput(input.schemaName, parsed)
-    });
-    return parsed;
+
+    return input.schema.parse(response);
+  }
+
+  private async invokeJsonFallback<T extends z.ZodTypeAny>(input: {
+    schema: T;
+    schemaName: string;
+    instructions: string;
+    prompt: string;
+    maxOutputTokens?: number;
+    verbosity?: "low" | "medium" | "high";
+  }): Promise<z.infer<T>> {
+    const schemaContract = zodToJsonSchema(input.schema, input.schemaName);
+    const response = await this.client.invoke([
+      [
+        "system",
+        [
+          input.instructions,
+          "The structured output path failed. Recover by returning only a valid JSON object with no markdown fences or commentary.",
+          "The JSON must satisfy this schema contract:",
+          JSON.stringify(schemaContract, null, 2),
+          `Keep the response concise and fit within ${input.maxOutputTokens ?? 4_000} output tokens.`,
+          `Preferred verbosity: ${input.verbosity ?? "medium"}.`
+        ].join("\n\n")
+      ],
+      ["user", input.prompt]
+    ]);
+
+    const text = extractModelText(response.content);
+    const jsonPayload = JSON.parse(extractJsonObject(text));
+    return input.schema.parse(jsonPayload);
   }
 }
 
@@ -1489,6 +1614,85 @@ function stringifyLogValue(value: unknown): string {
   } catch {
     return JSON.stringify(String(value));
   }
+}
+
+function toError(error: unknown): Error {
+  return error instanceof Error ? error : new Error(String(error));
+}
+
+function isStructuredOutputSchemaCompatibilityError(error: Error): boolean {
+  const message = error.message.toLowerCase();
+
+  return (
+    (message.includes("optional()") && message.includes("nullable()")) ||
+    message.includes("all fields must be required") ||
+    message.includes("structured outputs") ||
+    message.includes("json schema is invalid")
+  );
+}
+
+function isRetryableModelError(error: Error): boolean {
+  const message = error.message.toLowerCase();
+
+  return (
+    message.includes("rate limit") ||
+    message.includes("timed out") ||
+    message.includes("timeout") ||
+    message.includes("socket hang up") ||
+    message.includes("network") ||
+    message.includes("fetch failed") ||
+    message.includes("temporarily unavailable") ||
+    message.includes("internal server error") ||
+    message.includes("502") ||
+    message.includes("503") ||
+    message.includes("504")
+  );
+}
+
+function extractModelText(content: unknown): string {
+  if (typeof content === "string") {
+    return content;
+  }
+
+  if (Array.isArray(content)) {
+    return content
+      .map((part) => {
+        if (typeof part === "string") {
+          return part;
+        }
+
+        if (part && typeof part === "object") {
+          const text = (part as { text?: unknown }).text;
+          return typeof text === "string" ? text : "";
+        }
+
+        return "";
+      })
+      .join("\n")
+      .trim();
+  }
+
+  if (content && typeof content === "object" && "text" in (content as Record<string, unknown>)) {
+    const text = (content as { text?: unknown }).text;
+    return typeof text === "string" ? text : "";
+  }
+
+  return String(content ?? "");
+}
+
+function extractJsonObject(text: string): string {
+  const trimmed = text.trim();
+
+  if (trimmed.startsWith("{") || trimmed.startsWith("[")) {
+    return trimmed;
+  }
+
+  const jsonStart = trimmed.indexOf("{");
+  if (jsonStart >= 0) {
+    return trimmed.slice(jsonStart);
+  }
+
+  throw new Error("Model fallback response did not contain a JSON object.");
 }
 
 function summarizeAgentEventPayload(event: AgentEvent): Record<string, unknown> | null {
