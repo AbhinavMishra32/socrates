@@ -37,6 +37,9 @@ const blueprintStep: BlueprintStep = {
   title: "Execute the workflow loop",
   summary: "Walk from the graph start node until there is no next node, returning final state and visit order.",
   doc: "The runner is the core runtime.",
+  lessonSlides: [
+    "## Execution model\n\n- Start at the graph entry node.\n- Run each node in order.\n- Stop when there is no next node."
+  ],
   anchor: {
     file: "src/runner.ts",
     marker: "TASK:runner-loop"

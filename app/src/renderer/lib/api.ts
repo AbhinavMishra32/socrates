@@ -1,5 +1,7 @@
 import type {
   AgentEvent,
+  BlueprintDeepDiveRequest,
+  BlueprintDeepDiveResponse,
   AgentJobCreatedResponse,
   AgentJobSnapshot,
   BlueprintEnvelope,
@@ -63,6 +65,17 @@ export async function requestRuntimeGuide(
   onEvent?: (event: AgentEvent) => void
 ): Promise<RuntimeGuideResponse> {
   return runAgentJob<RuntimeGuideResponse>("/agent/runtime/guide-job", input, onEvent);
+}
+
+export async function requestBlueprintDeepDive(
+  input: BlueprintDeepDiveRequest,
+  onEvent?: (event: AgentEvent) => void
+): Promise<BlueprintDeepDiveResponse> {
+  return runAgentJob<BlueprintDeepDiveResponse>(
+    "/agent/blueprint/deepen-job",
+    input,
+    onEvent
+  );
 }
 
 export async function fetchWorkspaceFiles(

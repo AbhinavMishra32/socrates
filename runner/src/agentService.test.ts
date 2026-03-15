@@ -71,7 +71,7 @@ test("ConstructAgentService creates question and plan jobs and persists the resu
             complexityScore: 90,
             shouldResearch: true,
             recommendedQuestionCount: 4,
-            recommendedMinSteps: 4,
+            recommendedMinSteps: 1,
             recommendedMaxSteps: 8,
             rationale: "A compiler is a systems project and should use the full Architect path."
           });
@@ -346,7 +346,12 @@ test("ConstructAgentService creates question and plan jobs and persists the resu
                 id: "step.lexer-tokenize",
                 title: "Implement tokenize",
                 summary: "Convert source text into ordered word tokens.",
-                doc: "Start the project by defining the first real lexer behavior.",
+                doc: "Edit src/lexer.ts so tokenize splits the incoming source into whitespace-delimited lexemes and returns Token objects in the same order. The hidden test verifies that the resulting array preserves source order and uses the shared Token shape.",
+                lessonSlides: [
+                  "## Why tokenization comes first\nA compiler never reads raw characters all the way through every later phase. The lexer creates a cleaner vocabulary for the parser by turning source text into small structured token objects. We start here because it is the first meaningful behavior that unlocks parsing while still being small enough to reason about on its own.",
+                  "## What the lexer is modeling\nFor this tiny compiler step, every whitespace-delimited word becomes a token with two pieces of information: its kind and its original lexeme. The important idea is not just splitting a string, but creating a stable sequence that preserves source order so later phases can trust the token stream.",
+                  "## Mental model for the implementation\nThink of `tokenize` as a transformation pipeline: raw source goes in, empty gaps are ignored, and each real lexeme becomes a `{ kind, lexeme }` record. If the lexer changes order or shape, the parser will read the wrong program, so deterministic mapping matters more than clever code."
+                ],
                 anchor: {
                   file: "src/lexer.ts",
                   marker: "TASK:lexer-tokenize",
@@ -777,7 +782,12 @@ test("ConstructAgentService skips broad research for small local goals", async (
                 id: "step.todo-class",
                 title: "Implement the todo class",
                 summary: "Create the TodoList class.",
-                doc: "Implement the class in a single module.",
+                doc: "Edit todo.py to define the TodoList class in a single module, store items in memory, and expose the constructor plus add/list behavior the tests exercise. The hidden test checks that a new instance starts empty and that added items are returned in insertion order.",
+                lessonSlides: [
+                  "## Why the class itself is the first lesson\nThe learner asked for a small Python todo class, so the real artifact is the class design itself, not packaging or setup. A good first step teaches how a class holds state and exposes behavior through a tiny, readable API.",
+                  "## What state this class owns\n`TodoList` needs one simple responsibility: keep an ordered in-memory collection of todo items. That means the constructor should establish the internal list, and later methods should read from or append to that list without hiding where the data lives.",
+                  "## Why insertion order matters\nA todo list feels correct only if it gives items back in the same order the user added them. That is why the first implementation step focuses on class state and predictable list behavior instead of adding extra abstractions."
+                ],
                 anchor: {
                   file: "todo.py",
                   marker: "TASK:todo-class",
@@ -854,6 +864,288 @@ test("ConstructAgentService skips broad research for small local goals", async (
         stage.includes("research-architecture:Research skipped for small local scope")
       )
     );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("ConstructAgentService generates lesson-first blueprints without a repair loop", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "construct-agent-blueprint-repair-"));
+  let blueprintCalls = 0;
+
+  const service = new ConstructAgentService(root, {
+    now: () => new Date("2026-03-15T00:00:00.000Z"),
+    search: {
+      async research(query) {
+        return {
+          query,
+          answer: "Use the smallest real code behavior first.",
+          sources: []
+        };
+      }
+    },
+    projectInstaller: {
+      async install() {
+        return {
+          status: "skipped",
+          packageManager: "none",
+          detail: "No supported dependency manifest was generated."
+        };
+      }
+    },
+    llm: {
+      async parse({ schemaName, schema }) {
+        if (schemaName === "construct_goal_scope") {
+          return schema.parse({
+            scopeSummary: "Small local utility class",
+            artifactShape: "single python class",
+            complexityScore: 10,
+            shouldResearch: false,
+            recommendedQuestionCount: 2,
+            recommendedMinSteps: 1,
+            recommendedMaxSteps: 3,
+            rationale: "This is a very small local class request."
+          });
+        }
+
+        if (schemaName === "construct_planning_question_draft") {
+          return schema.parse({
+            detectedLanguage: "python",
+            detectedDomain: "system info utility class",
+            questions: [
+              {
+                conceptId: "python.classes",
+                category: "language",
+                prompt: "How comfortable are you with Python classes?",
+                options: [
+                  {
+                    id: "comfortable",
+                    label: "I can write simple classes",
+                    description: "I understand constructors, methods, and instance state.",
+                    confidenceSignal: "comfortable"
+                  },
+                  {
+                    id: "shaky",
+                    label: "I know the basics but need examples",
+                    description: "I can follow class code, but I still want guidance writing it.",
+                    confidenceSignal: "shaky"
+                  },
+                  {
+                    id: "new",
+                    label: "Classes are new to me",
+                    description: "I need the class structure taught first.",
+                    confidenceSignal: "new"
+                  }
+                ]
+              },
+              {
+                conceptId: "python.stdlib.platform",
+                category: "domain",
+                prompt: "How comfortable are you with Python standard-library system introspection?",
+                options: [
+                  {
+                    id: "comfortable",
+                    label: "I know platform and os basics",
+                    description: "I can read from the standard library to inspect the machine.",
+                    confidenceSignal: "comfortable"
+                  },
+                  {
+                    id: "shaky",
+                    label: "I have seen it but need reminders",
+                    description: "I know the modules exist, but I want help using them well.",
+                    confidenceSignal: "shaky"
+                  },
+                  {
+                    id: "new",
+                    label: "This is new to me",
+                    description: "I need the Architect to teach the standard-library calls first.",
+                    confidenceSignal: "new"
+                  }
+                ]
+              }
+            ]
+          });
+        }
+
+        if (schemaName === "construct_generated_project_plan") {
+          return schema.parse({
+            summary: "Teach the first real SystemInfo behavior and then implement it in the class itself.",
+            knowledgeGraph: {
+              concepts: [
+                {
+                  id: "python.classes",
+                  label: "Python classes",
+                  category: "language",
+                  confidence: "shaky",
+                  rationale: "The learner wants guidance, so the first step should teach the class shape before coding."
+                }
+              ],
+              strengths: [],
+              gaps: ["Python class design", "Using platform/os safely"]
+            },
+            architecture: [
+              {
+                id: "component.system-info",
+                label: "SystemInfo",
+                kind: "component",
+                summary: "Expose read-only machine information from the Python standard library.",
+                dependsOn: []
+              }
+            ],
+            steps: [
+              {
+                id: "step.systeminfo-core",
+                title: "Implement the first SystemInfo property",
+                kind: "implementation",
+                objective: "Teach the class shape and implement the first real property that reads macOS details.",
+                rationale: "The first step should touch the actual artifact, not project setup.",
+                concepts: ["python.classes", "python.stdlib.platform"],
+                dependsOn: [],
+                validationFocus: ["SystemInfo exists", "os_name property returns a string"],
+                suggestedFiles: ["systeminfo.py"],
+                implementationNotes: ["Keep the first step focused on one real property and the class structure around it."],
+                quizFocus: ["Can explain why @property gives a read-only API."],
+                hiddenValidationFocus: ["Validates constructor shape and first property behavior."]
+              }
+            ],
+            suggestedFirstStepId: "step.systeminfo-core"
+          });
+        }
+
+        if (schemaName === "construct_generated_blueprint_bundle") {
+          blueprintCalls += 1;
+          return schema.parse({
+            projectName: "macos-systeminfo",
+            projectSlug: "macos-systeminfo",
+            description: "A tiny Python class for macOS system details.",
+            language: "python",
+            entrypoints: ["systeminfo.py"],
+            supportFiles: [
+              {
+                path: "README.md",
+                content: "# macos-systeminfo\n"
+              }
+            ],
+            canonicalFiles: [
+              {
+                path: "systeminfo.py",
+                content: "import platform\n\nclass SystemInfo:\n    @property\n    def os_name(self):\n        return platform.system()\n"
+              }
+            ],
+            learnerFiles: [
+              {
+                path: "systeminfo.py",
+                content: "import platform\n\nclass SystemInfo:\n    @property\n    def os_name(self):\n        # TASK:systeminfo-os-name\n        raise NotImplementedError('Implement os_name')\n"
+              }
+            ],
+            hiddenTests: [
+              {
+                path: "tests/test_systeminfo.py",
+                content: "from systeminfo import SystemInfo\n\ndef test_os_name_returns_a_string():\n    assert isinstance(SystemInfo().os_name, str)\n"
+              }
+            ],
+            steps: [
+              {
+                id: "step.systeminfo-core",
+                title: "Implement the first SystemInfo property",
+                summary: "Teach the class shape, then implement the first real read-only property.",
+                doc: "Edit systeminfo.py to complete the os_name property on SystemInfo. Use the Python standard library to return the operating-system name as a string, and keep the API read-only through @property so the test can call `SystemInfo().os_name` directly.",
+                lessonSlides: [
+                  "## Why the first step is a real property, not setup\nThe request is for a small Python class, so the lesson should start with the class API itself. `SystemInfo` becomes meaningful as soon as it can answer one real question about the machine in a clean, read-only way.",
+                  "## What `@property` is teaching here\nA property lets a class expose computed information through an attribute-like API. That is useful for system details because the caller can read `SystemInfo().os_name` as data, while the class still performs the underlying standard-library lookup internally.",
+                  "## How the standard library fits the design\n`platform.system()` already knows how to report the operating-system name. Wrapping it inside the property teaches an important design pattern: use the stdlib for real facts, then shape those facts behind a small interface the rest of the project can rely on."
+                ],
+                anchor: {
+                  file: "systeminfo.py",
+                  marker: "TASK:systeminfo-os-name",
+                  startLine: null,
+                  endLine: null
+                },
+                tests: ["tests/test_systeminfo.py"],
+                concepts: ["python.classes", "python.stdlib.platform"],
+                constraints: ["Use only the Python standard library.", "Keep the API read-only."],
+                checks: [
+                  {
+                    id: "check.systeminfo.1",
+                    type: "mcq",
+                    prompt: "Why is `@property` a good fit for `os_name` here?",
+                    options: [
+                      {
+                        id: "a",
+                        label: "It exposes a read-only value as an attribute-like API.",
+                        rationale: null
+                      },
+                      {
+                        id: "b",
+                        label: "It makes the method run only once per class.",
+                        rationale: null
+                      }
+                    ],
+                    answer: "a"
+                  }
+                ],
+                estimatedMinutes: 12,
+                difficulty: "intro"
+              }
+            ],
+            dependencyGraph: {
+              nodes: [
+                { id: "component.system-info", label: "SystemInfo", kind: "component" }
+              ],
+              edges: []
+            },
+            tags: ["python", "macos"]
+          });
+        }
+
+        throw new Error(`Unexpected schema request: ${schemaName}`);
+      }
+    }
+  });
+
+  try {
+    const questionJob = service.createPlanningQuestionsJob({
+      goal: "small python class that reports macOS system details",
+      learningStyle: "concept-first"
+    });
+    const questionResult = await waitForJobCompletion(service, questionJob.jobId);
+    const questionSession = questionResult.result as {
+      session: { sessionId: string; questions: Array<{ id: string; options: Array<{ id: string }> }> };
+    };
+
+    const planJob = service.createPlanningPlanJob({
+      sessionId: questionSession.session.sessionId,
+      answers: questionSession.session.questions.map((question) => ({
+        questionId: question.id,
+        answerType: "option" as const,
+        optionId: question.options[1]?.id ?? question.options[0]!.id
+      }))
+    });
+
+    await waitForJobCompletion(service, planJob.jobId);
+
+    assert.equal(blueprintCalls, 1);
+
+    const generatedProjectDirectories = await readdir(
+      path.join(root, ".construct", "generated-blueprints")
+    );
+    const generatedBlueprintPath = path.join(
+      root,
+      ".construct",
+      "generated-blueprints",
+      generatedProjectDirectories[0]!,
+      "project-blueprint.json"
+    );
+    const generatedBlueprint = JSON.parse(
+      await readFile(generatedBlueprintPath, "utf8")
+    ) as {
+      steps: Array<{ title: string; lessonSlides: string[]; doc: string }>;
+    };
+
+    assert.match(generatedBlueprint.steps[0]!.title, /SystemInfo property/i);
+    assert.ok(generatedBlueprint.steps[0]!.lessonSlides.length >= 2);
+    assert.doesNotMatch(generatedBlueprint.steps[0]!.title, /bootstrap|environment/i);
+    assert.match(generatedBlueprint.steps[0]!.doc, /Edit systeminfo\.py/i);
   } finally {
     await rm(root, { recursive: true, force: true });
   }

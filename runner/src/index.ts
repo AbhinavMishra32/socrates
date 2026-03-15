@@ -5,6 +5,7 @@ import { fileURLToPath } from "node:url";
 import {
   APP_NAME,
   AgentJobSnapshotSchema,
+  BlueprintDeepDiveRequestSchema,
   BlueprintTaskRequestSchema,
   PlanningSessionCompleteRequestSchema,
   PlanningSessionStartRequestSchema,
@@ -270,6 +271,16 @@ const server = http.createServer(async (request, response) => {
       const body = await readRequestBody(request);
       const guideRequest = RuntimeGuideRequestSchema.parse(JSON.parse(body));
       const job = getConstructAgent().createRuntimeGuideJob(guideRequest);
+
+      response.writeHead(202, { "Content-Type": "application/json" });
+      response.end(JSON.stringify(job));
+      return;
+    }
+
+    if (request.method === "POST" && request.url === "/agent/blueprint/deepen-job") {
+      const body = await readRequestBody(request);
+      const deepDiveRequest = BlueprintDeepDiveRequestSchema.parse(JSON.parse(body));
+      const job = getConstructAgent().createBlueprintDeepDiveJob(deepDiveRequest);
 
       response.writeHead(202, { "Content-Type": "application/json" });
       response.end(JSON.stringify(job));

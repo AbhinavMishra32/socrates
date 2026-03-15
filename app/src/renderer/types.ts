@@ -141,6 +141,7 @@ export type BlueprintStep = {
   title: string;
   summary: string;
   doc: string;
+  lessonSlides: string[];
   anchor: {
     file: string;
     marker: string;
@@ -303,7 +304,7 @@ export type CurrentPlanningSessionResponse = {
 
 export type AgentJobCreatedResponse = {
   jobId: string;
-  kind: "planning-questions" | "planning-plan" | "runtime-guide";
+  kind: "planning-questions" | "planning-plan" | "runtime-guide" | "blueprint-deep-dive";
   status: "queued" | "running" | "completed" | "failed";
   streamPath: string;
   resultPath: string;
@@ -311,7 +312,7 @@ export type AgentJobCreatedResponse = {
 
 export type AgentJobSnapshot = {
   jobId: string;
-  kind: "planning-questions" | "planning-plan" | "runtime-guide";
+  kind: "planning-questions" | "planning-plan" | "runtime-guide" | "blueprint-deep-dive";
   status: "queued" | "running" | "completed" | "failed";
   createdAt: string;
   updatedAt: string;
@@ -322,7 +323,7 @@ export type AgentJobSnapshot = {
 export type AgentEvent = {
   id: string;
   jobId: string;
-  kind: "planning-questions" | "planning-plan" | "runtime-guide";
+  kind: "planning-questions" | "planning-plan" | "runtime-guide" | "blueprint-deep-dive";
   stage: string;
   title: string;
   detail?: string;
@@ -354,6 +355,25 @@ export type RuntimeGuideResponse = {
     level3: string;
   };
   nextAction: string;
+};
+
+export type BlueprintDeepDiveRequest = {
+  canonicalBlueprintPath: string;
+  learnerBlueprintPath: string;
+  stepId: string;
+  learnerModel: LearnerModel | null;
+  taskResult: TaskResult | null;
+  failureCount: number;
+  hintsUsed: number;
+  revealedHints: string[];
+};
+
+export type BlueprintDeepDiveResponse = {
+  blueprintPath: string;
+  step: BlueprintStep;
+  insertedSlideCount: number;
+  insertedCheckCount: number;
+  note: string;
 };
 
 export type WorkspaceFilesEnvelope = {

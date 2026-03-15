@@ -43,6 +43,7 @@ export const BlueprintStepSchema = z.object({
   title: z.string().min(1),
   summary: z.string().min(1),
   doc: z.string().min(1),
+  lessonSlides: z.array(z.string().min(1)).default([]),
   anchor: AnchorSchema,
   tests: z.array(z.string().min(1)).min(1),
   concepts: z.array(z.string().min(1)).min(1),

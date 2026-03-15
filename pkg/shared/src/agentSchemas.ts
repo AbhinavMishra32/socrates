@@ -1,6 +1,6 @@
 import { z } from "zod";
 
-import { LearnerModelSchema, TaskResultSchema } from "./schemas";
+import { BlueprintStepSchema, LearnerModelSchema, TaskResultSchema } from "./schemas";
 
 export const LearningStyleSchema = z.enum([
   "concept-first",
@@ -149,7 +149,8 @@ export const UserKnowledgeBaseSchema = z.object({
 export const AgentJobKindSchema = z.enum([
   "planning-questions",
   "planning-plan",
-  "runtime-guide"
+  "runtime-guide",
+  "blueprint-deep-dive"
 ]);
 
 export const AgentJobStatusSchema = z.enum([
@@ -216,6 +217,25 @@ export const RuntimeGuideResponseSchema = z.object({
   nextAction: z.string().min(1)
 });
 
+export const BlueprintDeepDiveRequestSchema = z.object({
+  canonicalBlueprintPath: z.string().min(1),
+  learnerBlueprintPath: z.string().min(1),
+  stepId: z.string().min(1),
+  learnerModel: LearnerModelSchema.nullable().default(null),
+  taskResult: TaskResultSchema.nullable().default(null),
+  failureCount: z.number().int().nonnegative().default(0),
+  hintsUsed: z.number().int().nonnegative().default(0),
+  revealedHints: z.array(z.string().min(1)).default([])
+});
+
+export const BlueprintDeepDiveResponseSchema = z.object({
+  blueprintPath: z.string().min(1),
+  step: BlueprintStepSchema,
+  insertedSlideCount: z.number().int().nonnegative(),
+  insertedCheckCount: z.number().int().nonnegative(),
+  note: z.string().min(1)
+});
+
 export type LearningStyle = z.infer<typeof LearningStyleSchema>;
 export type ConceptConfidence = z.infer<typeof ConceptConfidenceSchema>;
 export type PlanningQuestionOption = z.infer<typeof PlanningQuestionOptionSchema>;
@@ -243,3 +263,5 @@ export type AgentJobCreatedResponse = z.infer<typeof AgentJobCreatedResponseSche
 export type AgentJobSnapshot = z.infer<typeof AgentJobSnapshotSchema>;
 export type RuntimeGuideRequest = z.infer<typeof RuntimeGuideRequestSchema>;
 export type RuntimeGuideResponse = z.infer<typeof RuntimeGuideResponseSchema>;
+export type BlueprintDeepDiveRequest = z.infer<typeof BlueprintDeepDiveRequestSchema>;
+export type BlueprintDeepDiveResponse = z.infer<typeof BlueprintDeepDiveResponseSchema>;

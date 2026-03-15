@@ -14,6 +14,8 @@ import {
   AgentJobCreatedResponseSchema,
   AgentJobSnapshotSchema,
   BlueprintStepSchema,
+  BlueprintDeepDiveRequestSchema,
+  BlueprintDeepDiveResponseSchema,
   CurrentPlanningSessionResponseSchema,
   DependencyGraphSchema,
   GeneratedProjectPlanSchema,
@@ -33,6 +35,8 @@ import {
   type AgentJobKind,
   type AgentJobSnapshot,
   type ArchitectureComponent,
+  type BlueprintDeepDiveRequest,
+  type BlueprintDeepDiveResponse,
   type ConceptConfidence,
   type GeneratedProjectPlan,
   type KnowledgeGraph,
@@ -62,6 +66,7 @@ import {
   getActiveBlueprintPath as getActiveBlueprintPathFromFile,
   setActiveBlueprintPath
 } from "./activeBlueprint";
+import { loadBlueprint } from "./testRunner";
 import { zodToJsonSchema } from "zod-to-json-schema";
 
 type PlanningStateFile = {
@@ -358,6 +363,7 @@ const GENERATED_BLUEPRINT_STEP_DRAFT_SCHEMA = z.object({
   title: z.string().min(1),
   summary: z.string().min(1),
   doc: z.string().min(1),
+  lessonSlides: z.array(z.string().min(1)).default([]),
   anchor: GENERATED_ANCHOR_DRAFT_SCHEMA,
   tests: z.array(z.string().min(1)).min(1),
   concepts: z.array(z.string().min(1)).min(1),
@@ -381,6 +387,16 @@ const GENERATED_BLUEPRINT_BUNDLE_DRAFT_SCHEMA = z.object({
   dependencyGraph: DependencyGraphSchema,
   tags: z.array(z.string().min(1))
 });
+
+const GENERATED_DEEP_DIVE_DRAFT_SCHEMA = z.object({
+  note: z.string().min(1),
+  lessonSlides: z.array(z.string().min(1)).min(1).max(6),
+  checks: z.array(GENERATED_COMPREHENSION_CHECK_DRAFT_SCHEMA).min(1).max(5),
+  constraints: z.array(z.string().min(1)).max(4).default([])
+});
+
+type GeneratedBlueprintBundleDraft = z.infer<typeof GENERATED_BLUEPRINT_BUNDLE_DRAFT_SCHEMA>;
+type GeneratedBlueprintStepDraft = z.infer<typeof GENERATED_BLUEPRINT_STEP_DRAFT_SCHEMA>;
 
 export class ConstructAgentService {
   private readonly rootDirectory: string;
@@ -575,6 +591,33 @@ export class ConstructAgentService {
     void this.runJob(job, async () => {
       const result = await this.runRuntimeGuideGraph(job.jobId, request);
       return RuntimeGuideResponseSchema.parse(result);
+    });
+
+    return AgentJobCreatedResponseSchema.parse({
+      jobId: job.jobId,
+      kind: job.kind,
+      status: job.status,
+      streamPath: `/agent/jobs/${job.jobId}/stream`,
+      resultPath: `/agent/jobs/${job.jobId}`
+    });
+  }
+
+  createBlueprintDeepDiveJob(
+    input: BlueprintDeepDiveRequest
+  ): AgentJobCreatedResponse {
+    const request = BlueprintDeepDiveRequestSchema.parse(input);
+    const job = this.createJob("blueprint-deep-dive");
+    this.logger.info("Queued blueprint deep-dive job.", {
+      jobId: job.jobId,
+      kind: job.kind,
+      stepId: request.stepId,
+      failureCount: request.failureCount,
+      hintsUsed: request.hintsUsed
+    });
+
+    void this.runJob(job, async () => {
+      const result = await this.runBlueprintDeepDiveGraph(job.jobId, request);
+      return BlueprintDeepDiveResponseSchema.parse(result);
     });
 
     return AgentJobCreatedResponseSchema.parse({
@@ -994,7 +1037,7 @@ export class ConstructAgentService {
             )
           : await this.withStage(jobId, "research-dependency-order", "Researching dependency order", "Tracing which modules must exist first and how the build should be sequenced.", async () => {
               return this.getSearch().research(
-                `${state.session.goal} dependency order, implementation sequence, bootstrap plan`
+                `${state.session.goal} dependency order, implementation sequence, first real behavior to implement`
               );
             })
       }))
@@ -1096,7 +1139,7 @@ export class ConstructAgentService {
             "project bundle synthesis"
           );
 
-          const bundleDraft = await this.getLlm().parse({
+          const initialBundleDraft = await this.getLlm().parse({
             schema: GENERATED_BLUEPRINT_BUNDLE_DRAFT_SCHEMA,
             schemaName: "construct_generated_blueprint_bundle",
             instructions: buildBlueprintGenerationInstructions(),
@@ -1118,6 +1161,8 @@ export class ConstructAgentService {
           }).finally(() => {
             stream.onComplete?.();
           });
+
+          const bundleDraft = normalizeGeneratedBlueprintDraft(initialBundleDraft);
 
           if (job) {
             this.emitEvent(job, {
@@ -1240,6 +1285,163 @@ export class ConstructAgentService {
     });
 
     return RuntimeGuideResponseSchema.parse(result.guide);
+  }
+
+  private async runBlueprintDeepDiveGraph(
+    jobId: string,
+    request: BlueprintDeepDiveRequest
+  ): Promise<BlueprintDeepDiveResponse> {
+    const StateAnnotation = Annotation.Root({
+      jobId: Annotation<string>(),
+      request: Annotation<BlueprintDeepDiveRequest>(),
+      knowledgeBase: Annotation<UserKnowledgeBase>(),
+      canonicalBlueprint: Annotation<ProjectBlueprint | null>(),
+      learnerBlueprint: Annotation<ProjectBlueprint | null>(),
+      currentStep: Annotation<ProjectBlueprint["steps"][number] | null>(),
+      deepDiveDraft: Annotation<z.infer<typeof GENERATED_DEEP_DIVE_DRAFT_SCHEMA> | null>(),
+      response: Annotation<BlueprintDeepDiveResponse | null>()
+    });
+
+    const graph = new StateGraph(StateAnnotation)
+      .addNode("loadKnowledgeBase", async () => ({
+        knowledgeBase: await this.withStage(jobId, "knowledge-base", "Loading learner context", "Reading stored knowledge and recent struggle signals before generating the deeper walkthrough.", async () => {
+          return this.readKnowledgeBase();
+        })
+      }))
+      .addNode("loadBlueprint", async (state) => {
+        const canonicalBlueprint = await this.withStage(jobId, "deep-dive-blueprint", "Loading the active blueprint", "Opening the current generated blueprint so Construct can mutate the exact step the learner is stuck on.", async () => {
+          return loadBlueprint(state.request.canonicalBlueprintPath);
+        });
+        const learnerBlueprint = await loadBlueprint(state.request.learnerBlueprintPath);
+        const currentStep =
+          canonicalBlueprint.steps.find((step) => step.id === state.request.stepId) ?? null;
+
+        if (!currentStep) {
+          throw new Error(`Unknown blueprint step ${state.request.stepId}.`);
+        }
+
+        return {
+          canonicalBlueprint,
+          learnerBlueprint,
+          currentStep
+        };
+      })
+      .addNode("generateDeepDive", async (state) => ({
+        deepDiveDraft: await this.withStage(jobId, "deep-dive-generation", "Designing a deeper walkthrough", "The Architect is generating additional concept slides and a tighter quiz for the exact blocker you hit in this step.", async () => {
+          const stream = this.createModelStreamForwarder(
+            jobId,
+            "deep-dive-generation",
+            "deep dive generation"
+          );
+          try {
+            return this.getLlm().parse({
+              schema: GENERATED_DEEP_DIVE_DRAFT_SCHEMA,
+              schemaName: "construct_blueprint_deep_dive",
+              instructions: buildBlueprintDeepDiveInstructions(),
+              prompt: JSON.stringify(
+                {
+                  request: state.request,
+                  currentStep: state.currentStep,
+                  currentSlides:
+                    state.currentStep && state.currentStep.lessonSlides.length > 0
+                      ? state.currentStep.lessonSlides
+                      : state.currentStep
+                        ? [state.currentStep.doc]
+                        : [],
+                  priorKnowledge: compactKnowledgeBase(state.knowledgeBase)
+                },
+                null,
+                2
+              ),
+              maxOutputTokens: 4_000,
+              verbosity: "medium",
+              stream
+            });
+          } finally {
+            stream.onComplete?.();
+          }
+        })
+      }))
+      .addNode("applyMutation", async (state) => {
+        if (!state.canonicalBlueprint || !state.learnerBlueprint || !state.currentStep || !state.deepDiveDraft) {
+          throw new Error("Cannot apply a deep dive without the active blueprint and generated walkthrough.");
+        }
+
+        const canonicalBlueprint = state.canonicalBlueprint;
+        const learnerBlueprint = state.learnerBlueprint;
+        const currentStep = state.currentStep;
+        const deepDiveDraft = state.deepDiveDraft;
+
+        return {
+          response: await this.withPayloadStage(
+            jobId,
+            "deep-dive-apply",
+            "Updating the active blueprint",
+            "Saving the deeper walkthrough into the active step so the brief reopens with more explanation before the task.",
+            async () => {
+              const updatedStep = BlueprintStepSchema.parse({
+                ...currentStep,
+                lessonSlides: [
+                  ...deepDiveDraft.lessonSlides,
+                  ...getExistingLessonSlides(currentStep)
+                ],
+                checks: [
+                  ...normalizeGeneratedChecks(deepDiveDraft.checks),
+                  ...currentStep.checks
+                ],
+                constraints: Array.from(
+                  new Set([...deepDiveDraft.constraints, ...currentStep.constraints])
+                )
+              });
+
+              const updatedCanonicalBlueprint = replaceBlueprintStep(
+                canonicalBlueprint,
+                updatedStep
+              );
+              const updatedLearnerBlueprint = replaceBlueprintStep(
+                learnerBlueprint,
+                updatedStep
+              );
+
+              await this.writeBlueprintFile(
+                state.request.canonicalBlueprintPath,
+                updatedCanonicalBlueprint
+              );
+              await this.writeBlueprintFile(
+                state.request.learnerBlueprintPath,
+                updatedLearnerBlueprint
+              );
+
+              return {
+                blueprintPath: state.request.learnerBlueprintPath,
+                step: updatedStep,
+                insertedSlideCount: deepDiveDraft.lessonSlides.length,
+                insertedCheckCount: deepDiveDraft.checks.length,
+                note: deepDiveDraft.note
+              };
+            }
+          )
+        };
+      })
+      .addEdge(START, "loadKnowledgeBase")
+      .addEdge("loadKnowledgeBase", "loadBlueprint")
+      .addEdge("loadBlueprint", "generateDeepDive")
+      .addEdge("generateDeepDive", "applyMutation")
+      .addEdge("applyMutation", END)
+      .compile();
+
+    const result = await graph.invoke({
+      jobId,
+      request,
+      knowledgeBase: emptyKnowledgeBase(this.now),
+      canonicalBlueprint: null,
+      learnerBlueprint: null,
+      currentStep: null,
+      deepDiveDraft: null,
+      response: null
+    });
+
+    return BlueprintDeepDiveResponseSchema.parse(result.response);
   }
 
   private async withStage<T>(
@@ -1595,7 +1797,7 @@ export class ConstructAgentService {
     jobId: string,
     session: PlanningSession,
     plan: GeneratedProjectPlan,
-    draft: z.infer<typeof GENERATED_BLUEPRINT_BUNDLE_DRAFT_SCHEMA>
+    draft: GeneratedBlueprintBundleDraft
   ): Promise<string> {
     const supportFiles = fileEntriesToRecord(draft.supportFiles);
     const canonicalFiles = fileEntriesToRecord(draft.canonicalFiles);
@@ -1776,6 +1978,13 @@ export class ConstructAgentService {
       stepCount: plan.steps.length,
       architectureNodeCount: plan.architecture.length
     });
+  }
+
+  private async writeBlueprintFile(
+    blueprintPath: string,
+    blueprint: ProjectBlueprint
+  ): Promise<void> {
+    await writeFile(blueprintPath, `${JSON.stringify(blueprint, null, 2)}\n`, "utf8");
   }
 
   private async writeProjectFiles(
@@ -2861,41 +3070,113 @@ function emptyKnowledgeBase(now: () => Date): UserKnowledgeBase {
   });
 }
 
+function normalizeDraftLessonSlides(
+  lessonSlides: string[],
+  fallbackDoc: string
+): string[] {
+  const rawSlides = lessonSlides.length > 0 ? lessonSlides : [fallbackDoc];
+  const normalizedSlides: string[] = [];
+
+  for (const rawSlide of rawSlides) {
+    const prepared = rawSlide.replaceAll("\\n", "\n").trim();
+    if (!prepared) {
+      continue;
+    }
+
+    const multiSlideMatches = Array.from(
+      prepared.matchAll(/(?:^|\n)\s*(?:[-*]\s*)?slide\s+\d+\s*:\s*/gi)
+    );
+
+    if (multiSlideMatches.length >= 2) {
+      const fragments = prepared
+        .split(/(?:^|\n)\s*(?:[-*]\s*)?slide\s+\d+\s*:\s*/gi)
+        .map((fragment) => fragment.trim())
+        .filter(Boolean);
+
+      for (const fragment of fragments) {
+        normalizedSlides.push(fragment);
+      }
+      continue;
+    }
+
+    normalizedSlides.push(prepared);
+  }
+
+  return normalizedSlides.length > 0 ? normalizedSlides : [fallbackDoc.trim()];
+}
+
+function normalizeGeneratedBlueprintDraft(
+  draft: GeneratedBlueprintBundleDraft
+): GeneratedBlueprintBundleDraft {
+  return {
+    ...draft,
+    steps: draft.steps.map((step) => ({
+      ...step,
+      lessonSlides: normalizeDraftLessonSlides(step.lessonSlides, step.doc)
+    }))
+  };
+}
+
 function normalizeGeneratedBlueprintSteps(
-  steps: Array<z.infer<typeof GENERATED_BLUEPRINT_STEP_DRAFT_SCHEMA>>
+  steps: GeneratedBlueprintBundleDraft["steps"]
 ): ProjectBlueprint["steps"] {
   return steps.map((step) =>
     BlueprintStepSchema.parse({
       ...step,
+      lessonSlides: normalizeDraftLessonSlides(step.lessonSlides, step.doc),
       anchor: {
         file: step.anchor.file,
         marker: step.anchor.marker,
         ...(step.anchor.startLine === null ? {} : { startLine: step.anchor.startLine }),
         ...(step.anchor.endLine === null ? {} : { endLine: step.anchor.endLine })
       },
-      checks: step.checks.map((check) => {
-        if (check.type === "mcq") {
-          return {
-            id: check.id,
-            type: check.type,
-            prompt: check.prompt,
-            answer: check.answer,
-            options: check.options.map((option) => ({
-              id: option.id,
-              label: option.label,
-              ...(option.rationale === null ? {} : { rationale: option.rationale })
-            }))
-          };
-        }
-
-        const { placeholder: _placeholder, ...rest } = check;
-        return {
-          ...rest,
-          ...(check.placeholder === null ? {} : { placeholder: check.placeholder })
-        };
-      })
+      checks: normalizeGeneratedChecks(step.checks)
     })
   );
+}
+
+function normalizeGeneratedChecks(
+  checks: Array<z.infer<typeof GENERATED_COMPREHENSION_CHECK_DRAFT_SCHEMA>>
+): ProjectBlueprint["steps"][number]["checks"] {
+  return checks.map((check) => {
+    if (check.type === "mcq") {
+      return {
+        id: check.id,
+        type: check.type,
+        prompt: check.prompt,
+        answer: check.answer,
+        options: check.options.map((option) => ({
+          id: option.id,
+          label: option.label,
+          ...(option.rationale === null ? {} : { rationale: option.rationale })
+        }))
+      };
+    }
+
+    const { placeholder: _placeholder, ...rest } = check;
+    return {
+      ...rest,
+      ...(check.placeholder === null ? {} : { placeholder: check.placeholder })
+    };
+  });
+}
+
+function replaceBlueprintStep(
+  blueprint: ProjectBlueprint,
+  step: ProjectBlueprint["steps"][number]
+): ProjectBlueprint {
+  return ProjectBlueprintSchema.parse({
+    ...blueprint,
+    steps: blueprint.steps.map((currentStep) =>
+      currentStep.id === step.id ? step : currentStep
+    )
+  });
+}
+
+function getExistingLessonSlides(
+  step: ProjectBlueprint["steps"][number]
+): string[] {
+  return step.lessonSlides.length > 0 ? step.lessonSlides : [step.doc];
 }
 
 function slugify(value: string): string {
@@ -3026,6 +3307,10 @@ function buildPlanGenerationInstructions(): string {
     "If the learner is weak in a prerequisite concept, insert a skill step immediately before the implementation step that needs it.",
     "Keep the total number of steps within goalScope.recommendedMinSteps and goalScope.recommendedMaxSteps.",
     "Use goalScope.scopeSummary and goalScope.artifactShape to decide how narrow or broad the plan should be.",
+    "The first step should usually teach and implement the first real code behavior or design decision in the artifact.",
+    "Do not spend the first step on environment setup, dependency installation, version pinning, package metadata, or generic scaffolding unless the user's goal explicitly asks to learn setup/tooling.",
+    "For small or local requests, keep the path tightly focused on the requested artifact. Do not inflate it with validation harness steps, environment validation steps, packaging steps, optional export steps, or side quests unless the user explicitly asked for those.",
+    "Do not create standalone quiz-only, checks-only, or validation-only steps. Checks belong inside the teaching step they validate.",
     "Do not produce toy exercises disconnected from the project.",
     "Suggested first step must reference one of the generated steps."
   ].join("\n");
@@ -3042,12 +3327,48 @@ function buildBlueprintGenerationInstructions(): string {
     "learnerFiles must correspond to the same file paths as canonicalFiles, but with focused TASK markers and incomplete implementations the learner must fill in.",
     "hiddenTests must validate the learner tasks and stay runnable without exposing full solutions in the learnerFiles.",
     "The answers payload includes the original question, the available options, and either a selected option or a custom freeform learner response. Use that context to tune scope, docs, checks, and task ordering.",
-    "Every step must point to a real learnerFile anchor and include doc text, comprehension checks, constraints, and targeted tests.",
+    "Every step must point to a real learnerFile anchor and include lessonSlides, doc text, comprehension checks, constraints, and targeted tests.",
+    "lessonSlides are the main teaching surface. Write them like a real course lesson in markdown, not like a checklist of instructions.",
+    "Teach the required concept from the learner's current level so they can actually solve the task afterward. Use markdown prose, bullet lists, ordered lists, blockquotes, and fenced code snippets when helpful.",
+    "lessonSlides should teach the concept in markdown before the task begins. Emit each slide as its own array entry. Do not collapse multiple slides into one string.",
+    "The first step must open with at least two real teaching slides unless the user explicitly asked for setup/tooling rather than implementation.",
+    "The first step should teach and implement the first meaningful code behavior or design decision, not environment setup or package scaffolding.",
+    "Do not generate a first step about pinning versions, creating a venv, installing test tools, package metadata, or generic project layout unless the user's goal explicitly asks for that.",
+    "lessonSlides must explain the why and how of the concept. They should not mainly say what the learner has to do next.",
+    "Do not write slides like task instructions, setup checklists, TODO lists, or short reminders. The lesson should feel like a real explanation that teaches the idea itself.",
+    "Do not start slides with 'Step 1', 'Step 2', or by repeating the step title as a markdown heading. The UI already shows course and step context.",
+    "Avoid giant title-only slides. Prefer explanation-rich markdown that reads like technical documentation or a high-quality lesson chapter.",
+    "Each slide should usually be substantial, not tiny. A good slide normally contains at least two explanatory paragraphs, or one paragraph plus a concrete list/example/code sketch.",
+    "For the first step and for any brand-new concept, it is usually better to generate 3-5 substantial markdown slides than 1-2 shallow ones.",
+    "Explain the mental model, the important APIs or language features involved, the invariants/constraints, and the exact behavior the later exercise will require.",
+    "Use code fences for conceptual sketches when helpful, but do not dump the full solution into the lesson.",
+    "For small or local requests, stay tightly scoped. Do not invent setup-heavy preliminaries, validation harness units, optional export features, platform checks, or packaging tasks before the first meaningful implementation step unless the user explicitly asked for them.",
+    "doc should describe the exercise or implementation task itself, not repeat the whole concept lesson. It must clearly say what code the learner will change, what behavior the tests will verify, and how the task connects to the just-taught concept.",
+    "The exercise should be solvable from the lessonSlides and checks that come before it. The quiz must be grounded in the lessonSlides, not random setup trivia or command memorization.",
+    "Do not create a separate checks-only or quiz-only step. Keep slides, checks, and task together inside the same step.",
+    "Every generated step should feel like part of a coherent course: explanation first, then checks that follow from the explanation, then a real code task that directly uses what was just taught.",
     "Keep the implementation inside the step budget defined by goalScope.recommendedMinSteps and goalScope.recommendedMaxSteps.",
     "Use goalScope.scopeSummary and goalScope.artifactShape to decide how small or broad the generated project should be.",
     "Choose build order from true project dependencies and the learner profile, not a generic tutorial order.",
     "For TypeScript and JavaScript projects, generate Jest tests and the minimum package/tooling files required to run them.",
     "Do not emit placeholder prose instead of code. Return concrete file contents."
+  ].join("\n");
+}
+
+function buildBlueprintDeepDiveInstructions(): string {
+  return [
+    "You are Construct's Architect agent.",
+    "The learner is stuck on a real implementation step and needs a deeper conceptual walkthrough before retrying the task.",
+    "Generate additional markdown lesson slides and follow-up comprehension checks for the exact blocker in this step.",
+    "Do not replace the task. Strengthen the teaching that comes before the task.",
+    "Return technically accurate markdown slides that build from the learner's current confusion and latest failure signal.",
+    "Do not repeat the step title as a heading. The UI already shows the step context.",
+    "The slides should usually be 2-4 substantial markdown slides, not a one-line reminder and not a giant essay.",
+    "Each slide should add real teaching depth: explain the mental model, the exact failure mode, a worked example, and the reasoning needed to succeed on the task.",
+    "Teach the idea itself. Do not respond with a checklist of what the learner should do next.",
+    "The checks should verify the new explanation before the learner returns to the implementation.",
+    "Use the failure count, hints used, revealed hints, task result, and prior knowledge to decide what to deepen.",
+    "Assume the new slides and checks will be prepended to the existing step."
   ].join("\n");
 }
 
