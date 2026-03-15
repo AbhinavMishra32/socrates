@@ -4,13 +4,16 @@ import { fileURLToPath } from "node:url";
 
 import {
   APP_NAME,
+  AgentJobSnapshotSchema,
   BlueprintTaskRequestSchema,
   PlanningSessionCompleteRequestSchema,
   PlanningSessionStartRequestSchema,
+  RuntimeGuideRequestSchema,
   TaskStartRequestSchema,
   TaskSubmitRequestSchema
 } from "@construct/shared";
 
+import { ConstructAgentService } from "./agentService";
 import { AgentPlannerService } from "./agentPlanner";
 import { WorkspaceFileManager } from "./fileManager";
 import { SnapshotService } from "./snapshots";
@@ -44,6 +47,15 @@ const taskLifecycle = new TaskLifecycleService(workspaceRoot, {
   snapshotService,
   testRunner
 });
+let constructAgent: ConstructAgentService | null = null;
+
+function getConstructAgent(): ConstructAgentService {
+  if (!constructAgent) {
+    constructAgent = new ConstructAgentService(rootDir);
+  }
+
+  return constructAgent;
+}
 
 const server = http.createServer(async (request, response) => {
   response.setHeader("Access-Control-Allow-Origin", "*");
@@ -72,6 +84,26 @@ const server = http.createServer(async (request, response) => {
     if (request.method === "GET" && request.url === "/agent/planning/current") {
       response.writeHead(200, { "Content-Type": "application/json" });
       response.end(JSON.stringify(await agentPlanner.getCurrentPlanningState()));
+      return;
+    }
+
+    if (request.method === "GET" && request.url?.startsWith("/agent/jobs/")) {
+      const url = new URL(request.url, "http://127.0.0.1");
+      const pathParts = url.pathname.split("/").filter(Boolean);
+      const [, , jobId, action] = pathParts;
+
+      if (!jobId) {
+        throw new Error("Missing agent job id.");
+      }
+
+      if (action === "stream") {
+        getConstructAgent().openJobStream(jobId, response);
+        return;
+      }
+
+      const job = AgentJobSnapshotSchema.parse(getConstructAgent().getJob(jobId));
+      response.writeHead(200, { "Content-Type": "application/json" });
+      response.end(JSON.stringify(job));
       return;
     }
 
@@ -133,6 +165,36 @@ const server = http.createServer(async (request, response) => {
 
       response.writeHead(200, { "Content-Type": "application/json" });
       response.end(JSON.stringify(planningResult));
+      return;
+    }
+
+    if (request.method === "POST" && request.url === "/agent/planning/start-job") {
+      const body = await readRequestBody(request);
+      const startRequest = PlanningSessionStartRequestSchema.parse(JSON.parse(body));
+      const job = getConstructAgent().createPlanningQuestionsJob(startRequest);
+
+      response.writeHead(202, { "Content-Type": "application/json" });
+      response.end(JSON.stringify(job));
+      return;
+    }
+
+    if (request.method === "POST" && request.url === "/agent/planning/complete-job") {
+      const body = await readRequestBody(request);
+      const completeRequest = PlanningSessionCompleteRequestSchema.parse(JSON.parse(body));
+      const job = getConstructAgent().createPlanningPlanJob(completeRequest);
+
+      response.writeHead(202, { "Content-Type": "application/json" });
+      response.end(JSON.stringify(job));
+      return;
+    }
+
+    if (request.method === "POST" && request.url === "/agent/runtime/guide-job") {
+      const body = await readRequestBody(request);
+      const guideRequest = RuntimeGuideRequestSchema.parse(JSON.parse(body));
+      const job = getConstructAgent().createRuntimeGuideJob(guideRequest);
+
+      response.writeHead(202, { "Content-Type": "application/json" });
+      response.end(JSON.stringify(job));
       return;
     }
 

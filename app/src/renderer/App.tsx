@@ -20,6 +20,7 @@ import {
   fetchTaskProgress,
   fetchWorkspaceFile,
   fetchWorkspaceFiles,
+  requestRuntimeGuide,
   saveWorkspaceFile,
   startPlanningSession,
   startBlueprintTask,
@@ -28,6 +29,7 @@ import {
 import { buildWorkspaceTree } from "./lib/tree";
 import { monaco } from "./monaco";
 import type {
+  AgentEvent,
   AnchorLocation,
   BlueprintStep,
   ComprehensionCheck,
@@ -40,6 +42,7 @@ import type {
   RewriteGate,
   RunnerHealth,
   RuntimeInfo,
+  RuntimeGuideResponse,
   TaskProgress,
   TaskResult,
   TaskSession,
@@ -81,6 +84,7 @@ export default function App() {
   const [planningSession, setPlanningSession] = useState<PlanningSession | null>(null);
   const [planningPlan, setPlanningPlan] = useState<GeneratedProjectPlan | null>(null);
   const [planningOverlayOpen, setPlanningOverlayOpen] = useState(false);
+  const [planningEvents, setPlanningEvents] = useState<AgentEvent[]>([]);
   const [planningGoal, setPlanningGoal] = useState("build a C compiler in Rust");
   const [planningLearningStyle, setPlanningLearningStyle] =
     useState<LearningStyle>("concept-first");
@@ -99,6 +103,10 @@ export default function App() {
   const [taskTelemetry, setTaskTelemetry] = useState<TaskTelemetry>(createEmptyTelemetry());
   const [taskError, setTaskError] = useState("");
   const [guideVisible, setGuideVisible] = useState(false);
+  const [runtimeGuide, setRuntimeGuide] = useState<RuntimeGuideResponse | null>(null);
+  const [runtimeGuideEvents, setRuntimeGuideEvents] = useState<AgentEvent[]>([]);
+  const [runtimeGuideBusy, setRuntimeGuideBusy] = useState(false);
+  const [runtimeGuideError, setRuntimeGuideError] = useState("");
   const [revealedHintLevel, setRevealedHintLevel] = useState(0);
   const editorRef = useRef<MonacoEditor.IStandaloneCodeEditor | null>(null);
   const decorationIdsRef = useRef<string[]>([]);
@@ -124,6 +132,14 @@ export default function App() {
     () => (activeStep ? buildStepHints(activeStep) : []),
     [activeStep]
   );
+  const guideQuestions = runtimeGuide?.socraticQuestions ?? guidePrompts;
+  const visibleHints = runtimeGuide
+    ? [
+        runtimeGuide.hints.level1,
+        runtimeGuide.hints.level2,
+        runtimeGuide.hints.level3
+      ]
+    : stepHints;
   const activeStepIndex = useMemo(
     () => blueprint?.steps.findIndex((step) => step.id === activeStepId) ?? -1,
     [activeStepId, blueprint]
@@ -373,6 +389,14 @@ export default function App() {
     setTaskTelemetry(nextTelemetry);
   };
 
+  const appendPlanningEvent = (event: AgentEvent) => {
+    setPlanningEvents((current) => appendAgentEvent(current, event));
+  };
+
+  const appendRuntimeGuideEvent = (event: AgentEvent) => {
+    setRuntimeGuideEvents((current) => appendAgentEvent(current, event));
+  };
+
   const openFile = async (filePath: string, step?: BlueprintStep | null) => {
     const requestId = ++activeRequestIdRef.current;
 
@@ -413,6 +437,9 @@ export default function App() {
     setActiveStepId(step.id);
     setSurfaceMode("brief");
     setGuideVisible(false);
+    setRuntimeGuide(null);
+    setRuntimeGuideEvents([]);
+    setRuntimeGuideError("");
     setRevealedHintLevel(0);
     resetTaskTelemetry();
     setTaskSession(null);
@@ -438,6 +465,9 @@ export default function App() {
     });
     setSurfaceMode("focus");
     setGuideVisible(false);
+    setRuntimeGuide(null);
+    setRuntimeGuideEvents([]);
+    setRuntimeGuideError("");
     setTaskError("");
     resetTaskTelemetry();
 
@@ -462,6 +492,58 @@ export default function App() {
     const linkedStep =
       blueprint?.steps.find((step) => step.anchor.file === filePath) ?? null;
     await openFile(filePath, linkedStep);
+  };
+
+  const loadRuntimeGuide = async (latestResult: TaskResult | null) => {
+    if (!activeStep) {
+      return;
+    }
+
+    setRuntimeGuideBusy(true);
+    setRuntimeGuideError("");
+    setGuideVisible(true);
+    setRuntimeGuide(null);
+    setRuntimeGuideEvents([]);
+    setRevealedHintLevel(0);
+
+    try {
+      const response = await requestRuntimeGuide(
+        {
+          stepId: activeStep.id,
+          stepTitle: activeStep.title,
+          stepSummary: activeStep.summary,
+          filePath: activeFilePath || activeStep.anchor.file,
+          anchorMarker: activeStep.anchor.marker,
+          codeSnippet:
+            buildAnchorSnippet(editorValue, anchorLocation) ||
+            `Anchor marker: ${activeStep.anchor.marker}`,
+          constraints: activeStep.constraints,
+          tests: activeStep.tests,
+          taskResult: latestResult,
+          learnerModel
+        },
+        appendRuntimeGuideEvent
+      );
+
+      setRuntimeGuide(response);
+      setStatusMessage(`Guide updated for ${activeStep.title}.`);
+    } catch (error) {
+      const message =
+        error instanceof Error ? error.message : `Failed to load guide for ${activeStep.id}.`;
+      setRuntimeGuideError(message);
+      setStatusMessage(message);
+    } finally {
+      setRuntimeGuideBusy(false);
+    }
+  };
+
+  const handleToggleGuide = () => {
+    if (guideVisible && (runtimeGuide || runtimeGuideBusy)) {
+      setGuideVisible(false);
+      return;
+    }
+
+    void loadRuntimeGuide(activeTaskResult);
   };
 
   const handleCheckResponseChange = (
@@ -526,6 +608,11 @@ export default function App() {
       setGuideVisible(submission.attempt.status !== "passed");
       resetTaskTelemetry();
       setRevealedHintLevel(0);
+
+      if (submission.attempt.status !== "passed") {
+        void loadRuntimeGuide(submission.attempt.result);
+      }
+
       setStatusMessage(
         submission.attempt.status === "passed"
           ? `Passed ${activeStep.title} on attempt ${submission.attempt.attempt}.`
@@ -546,12 +633,13 @@ export default function App() {
   const handleStartPlanning = async () => {
     setPlanningBusy(true);
     setPlanningError("");
+    setPlanningEvents([]);
 
     try {
       const started = await startPlanningSession({
         goal: planningGoal,
         learningStyle: planningLearningStyle
-      });
+      }, appendPlanningEvent);
 
       setPlanningSession(started.session);
       setPlanningPlan(null);
@@ -574,6 +662,7 @@ export default function App() {
 
     setPlanningBusy(true);
     setPlanningError("");
+    setPlanningEvents([]);
 
     try {
       const completed = await completePlanningSession({
@@ -582,7 +671,7 @@ export default function App() {
           questionId: question.id,
           value: planningAnswers[question.id]!
         }))
-      });
+      }, appendPlanningEvent);
 
       setPlanningSession(completed.session);
       setPlanningPlan(completed.plan);
@@ -809,12 +898,14 @@ export default function App() {
                 activeStep={activeStep}
                 activeStepIndex={activeStepIndex}
                 blueprint={blueprint}
-                guidePrompts={guidePrompts}
+                guidePrompts={guideQuestions}
                 guideVisible={guideVisible}
+                runtimeGuide={runtimeGuide}
+                runtimeGuideBusy={runtimeGuideBusy}
+                runtimeGuideError={runtimeGuideError}
+                runtimeGuideEvents={runtimeGuideEvents}
                 learnerModel={learnerModel}
-                onToggleGuide={() => {
-                  setGuideVisible((current) => !current);
-                }}
+                onToggleGuide={handleToggleGuide}
                 onSubmitTask={() => {
                   void handleSubmitTask();
                 }}
@@ -841,7 +932,7 @@ export default function App() {
                   });
                 }}
                 revealedHintLevel={revealedHintLevel}
-                stepHints={stepHints}
+                stepHints={visibleHints}
                 attemptStatus={activeAttemptStatus}
                 rewriteGate={activeRewriteGate}
                 taskProgress={activeTaskProgress}
@@ -860,6 +951,7 @@ export default function App() {
         {planningOverlayOpen ? (
           <PlanningOverlay
             planningBusy={planningBusy}
+            planningEvents={planningEvents}
             planningError={planningError}
             planningGoal={planningGoal}
             planningLearningStyle={planningLearningStyle}
@@ -918,6 +1010,10 @@ function FloatingGuideCard({
   blueprint,
   guidePrompts,
   guideVisible,
+  runtimeGuide,
+  runtimeGuideBusy,
+  runtimeGuideError,
+  runtimeGuideEvents,
   learnerModel,
   onToggleGuide,
   onSubmitTask,
@@ -940,6 +1036,10 @@ function FloatingGuideCard({
   blueprint: ProjectBlueprint | null;
   guidePrompts: string[];
   guideVisible: boolean;
+  runtimeGuide: RuntimeGuideResponse | null;
+  runtimeGuideBusy: boolean;
+  runtimeGuideError: string;
+  runtimeGuideEvents: AgentEvent[];
   learnerModel: LearnerModel | null;
   onToggleGuide: () => void;
   onSubmitTask: () => void;
@@ -1061,7 +1161,11 @@ function FloatingGuideCard({
               onClick={onToggleGuide}
               className="construct-secondary-button"
             >
-              {guideVisible ? "Hide guide" : "Ask guide"}
+              {runtimeGuideBusy
+                ? "Guide is thinking..."
+                : guideVisible
+                  ? "Hide guide"
+                  : "Ask guide"}
             </button>
           </div>
         </div>
@@ -1110,11 +1214,56 @@ function FloatingGuideCard({
               transition={{ duration: 0.2, ease: "easeOut" }}
               className="construct-guide-prompts"
             >
+              {runtimeGuide ? (
+                <div className="construct-guide-runtime-summary">
+                  <span className="construct-panel-kicker">Live Guide</span>
+                  <p>{runtimeGuide.summary}</p>
+                  {runtimeGuide.observations.length > 0 ? (
+                    <div className="construct-tag-list">
+                      {runtimeGuide.observations.map((observation) => (
+                        <span key={observation} className="construct-tag">
+                          {observation}
+                        </span>
+                      ))}
+                    </div>
+                  ) : null}
+                </div>
+              ) : null}
+
+              {runtimeGuideBusy ? (
+                <div className="construct-guide-prompt">
+                  Construct is analyzing the current code, learner profile, and latest test result.
+                </div>
+              ) : null}
+
+              {runtimeGuideError ? (
+                <div className="construct-inline-error">{runtimeGuideError}</div>
+              ) : null}
+
               {guidePrompts.map((prompt) => (
                 <div key={prompt} className="construct-guide-prompt">
                   {prompt}
                 </div>
               ))}
+
+              {runtimeGuide?.nextAction ? (
+                <div className="construct-guide-next-action">
+                  <span className="construct-panel-kicker">Next action</span>
+                  <p>{runtimeGuide.nextAction}</p>
+                </div>
+              ) : null}
+
+              {runtimeGuideEvents.length > 0 ? (
+                <div className="construct-guide-event-log">
+                  <span className="construct-panel-kicker">Agent activity</span>
+                  {runtimeGuideEvents.slice(-4).map((event) => (
+                    <div key={event.id} className="construct-guide-event-item">
+                      <strong>{event.title}</strong>
+                      {event.detail ? <p>{event.detail}</p> : null}
+                    </div>
+                  ))}
+                </div>
+              ) : null}
             </motion.div>
           ) : null}
         </AnimatePresence>
@@ -1134,6 +1283,7 @@ function FloatingGuideCard({
 
 function PlanningOverlay({
   planningBusy,
+  planningEvents,
   planningError,
   planningGoal,
   planningLearningStyle,
@@ -1149,6 +1299,7 @@ function PlanningOverlay({
   canCompletePlanning
 }: {
   planningBusy: boolean;
+  planningEvents: AgentEvent[];
   planningError: string;
   planningGoal: string;
   planningLearningStyle: LearningStyle;
@@ -1315,10 +1466,52 @@ function PlanningOverlay({
                   <div>
                     <strong>{step.title}</strong>
                     <span>{step.objective}</span>
+                    <small>{step.rationale}</small>
+                    {step.implementationNotes.length > 0 ? (
+                      <div className="construct-tag-list">
+                        {step.implementationNotes.map((note) => (
+                          <span key={note} className="construct-tag">
+                            {note}
+                          </span>
+                        ))}
+                      </div>
+                    ) : null}
                   </div>
                 </div>
               ))}
             </section>
+          </section>
+        ) : null}
+
+        {planningEvents.length > 0 ? (
+          <section className="construct-planning-event-log">
+            <div className="construct-brief-section-header">
+              <div>
+                <span className="construct-brief-kicker">Agent Activity</span>
+                <h2>What the Architect is doing right now.</h2>
+              </div>
+            </div>
+
+            <div className="construct-guide-event-log">
+              {planningEvents.map((event) => (
+                <div key={event.id} className="construct-guide-event-item">
+                  <strong>{event.title}</strong>
+                  {event.detail ? <p>{event.detail}</p> : null}
+                  {event.stage === "research" && Array.isArray(event.payload?.sources) ? (
+                    <div className="construct-tag-list">
+                      {(event.payload.sources as Array<{ title?: string }>).map((source, index) => (
+                        <span
+                          key={`${event.id}-${source.title ?? index}`}
+                          className="construct-tag"
+                        >
+                          {source.title ?? "Research source"}
+                        </span>
+                      ))}
+                    </div>
+                  ) : null}
+                </div>
+              ))}
+            </div>
           </section>
         ) : null}
 
@@ -1967,6 +2160,34 @@ function formatDuration(durationMs: number): string {
 
 function formatCommitId(commitId: string): string {
   return commitId.slice(0, 7);
+}
+
+function appendAgentEvent(events: AgentEvent[], nextEvent: AgentEvent): AgentEvent[] {
+  if (events.some((event) => event.id === nextEvent.id)) {
+    return events;
+  }
+
+  return [...events, nextEvent];
+}
+
+function buildAnchorSnippet(
+  content: string,
+  anchor: AnchorLocation | null,
+  radius = 24
+): string {
+  const lines = content.split("\n");
+
+  if (lines.length === 0) {
+    return "";
+  }
+
+  if (!anchor) {
+    return lines.slice(0, 80).join("\n");
+  }
+
+  const start = Math.max(anchor.lineNumber - radius - 1, 0);
+  const end = Math.min(anchor.lineNumber + radius, lines.length);
+  return lines.slice(start, end).join("\n");
 }
 
 function createEmptyTelemetry(): TaskTelemetry {

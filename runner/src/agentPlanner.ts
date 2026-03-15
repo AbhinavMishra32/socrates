@@ -509,7 +509,10 @@ function buildSteps(
       concepts: ["workflow.decomposition"],
       dependsOn: [],
       validationFocus: ["Can explain the first runnable slice", "Can identify the first dependency chain"],
-      suggestedFiles: ["docs/architecture.md"]
+      suggestedFiles: ["docs/architecture.md"],
+      implementationNotes: ["Trace the execution flow before implementing code."],
+      quizFocus: ["Can describe the dependency chain in the correct order."],
+      hiddenValidationFocus: ["Explains which module unlocks the next one."]
     });
   }
 
@@ -556,7 +559,13 @@ function buildSteps(
       concepts: template.concepts,
       dependsOn: template.dependsOn.map((dependency) => `step.${dependency.replace(/^component\./, "")}`),
       validationFocus: template.validationFocus,
-      suggestedFiles: template.suggestedFiles
+      suggestedFiles: template.suggestedFiles,
+      implementationNotes: [
+        `Implement the real ${template.label.toLowerCase()} slice in-place.`,
+        "Keep the public contract stable for downstream steps."
+      ],
+      quizFocus: template.concepts.map((conceptId) => `Can explain how ${conceptId} applies here.`),
+      hiddenValidationFocus: template.validationFocus
     });
 
     if (learningStyle === "build-first") {
@@ -591,7 +600,10 @@ function buildSkillStep(conceptId: string, anchorComponentId: string): Generated
       `${conceptMeta.label} can be explained correctly`,
       `${conceptMeta.label} can be used in the next task without copying`
     ],
-    suggestedFiles: []
+    suggestedFiles: [],
+    implementationNotes: [`Review ${conceptMeta.label} in the context of ${anchorComponentId}.`],
+    quizFocus: [`Can explain ${conceptMeta.label} in their own words.`],
+    hiddenValidationFocus: [`Applies ${conceptMeta.label} without direct copying.`]
   };
 }
 

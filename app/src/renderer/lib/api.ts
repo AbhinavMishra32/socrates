@@ -1,10 +1,15 @@
 import type {
+  AgentEvent,
+  AgentJobCreatedResponse,
+  AgentJobSnapshot,
   BlueprintEnvelope,
   CurrentPlanningSessionResponse,
   LearnerModel,
   PlanningAnswer,
   PlanningSessionCompleteResponse,
   PlanningSessionStartResponse,
+  RuntimeGuideRequest,
+  RuntimeGuideResponse,
   RunnerHealth,
   TaskProgress,
   TaskResult,
@@ -34,39 +39,30 @@ export async function fetchCurrentPlanningState(
 export async function startPlanningSession(input: {
   goal: string;
   learningStyle: "concept-first" | "build-first" | "example-first";
-}): Promise<PlanningSessionStartResponse> {
-  const response = await fetch(`${RUNNER_BASE_URL}/agent/planning/start`, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json"
-    },
-    body: JSON.stringify(input)
-  });
-
-  if (!response.ok) {
-    throw new Error(`Runner responded with ${response.status} while starting agent planning.`);
-  }
-
-  return parseJsonResponse<PlanningSessionStartResponse>(response, "starting planning");
+}, onEvent?: (event: AgentEvent) => void): Promise<PlanningSessionStartResponse> {
+  return runAgentJob<PlanningSessionStartResponse>(
+    "/agent/planning/start-job",
+    input,
+    onEvent
+  );
 }
 
 export async function completePlanningSession(input: {
   sessionId: string;
   answers: PlanningAnswer[];
-}): Promise<PlanningSessionCompleteResponse> {
-  const response = await fetch(`${RUNNER_BASE_URL}/agent/planning/complete`, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json"
-    },
-    body: JSON.stringify(input)
-  });
+}, onEvent?: (event: AgentEvent) => void): Promise<PlanningSessionCompleteResponse> {
+  return runAgentJob<PlanningSessionCompleteResponse>(
+    "/agent/planning/complete-job",
+    input,
+    onEvent
+  );
+}
 
-  if (!response.ok) {
-    throw new Error(`Runner responded with ${response.status} while completing agent planning.`);
-  }
-
-  return parseJsonResponse<PlanningSessionCompleteResponse>(response, "completing planning");
+export async function requestRuntimeGuide(
+  input: RuntimeGuideRequest,
+  onEvent?: (event: AgentEvent) => void
+): Promise<RuntimeGuideResponse> {
+  return runAgentJob<RuntimeGuideResponse>("/agent/runtime/guide-job", input, onEvent);
 }
 
 export async function fetchWorkspaceFiles(
@@ -189,6 +185,107 @@ async function getJson<T>(path: string, init?: RequestInit): Promise<T> {
   }
 
   return parseJsonResponse<T>(response, path);
+}
+
+async function runAgentJob<T>(
+  path: string,
+  input: unknown,
+  onEvent?: (event: AgentEvent) => void
+): Promise<T> {
+  const created = await postJson<AgentJobCreatedResponse>(path, input, `starting ${path}`);
+
+  return new Promise<T>((resolve, reject) => {
+    const stream = new EventSource(`${RUNNER_BASE_URL}${created.streamPath}`);
+    let settled = false;
+
+    const fail = (error: Error) => {
+      if (settled) {
+        return;
+      }
+
+      settled = true;
+      stream.close();
+      reject(error);
+    };
+
+    stream.addEventListener("agent-event", (event) => {
+      try {
+        onEvent?.(JSON.parse((event as MessageEvent).data) as AgentEvent);
+      } catch (error) {
+        fail(
+          error instanceof Error
+            ? error
+            : new Error("Failed to parse agent event stream.")
+        );
+      }
+    });
+
+    stream.addEventListener("agent-complete", (event) => {
+      if (settled) {
+        return;
+      }
+
+      settled = true;
+      stream.close();
+      resolve((JSON.parse((event as MessageEvent).data) as { result: T }).result);
+    });
+
+    stream.addEventListener("agent-error", (event) => {
+      const data = JSON.parse((event as MessageEvent).data) as { error?: string };
+      fail(new Error(data.error ?? "Agent job failed."));
+    });
+
+    stream.onerror = () => {
+      if (settled) {
+        return;
+      }
+
+      void recoverAgentJob(created)
+        .then((snapshot) => {
+          if (snapshot.status === "completed") {
+            settled = true;
+            stream.close();
+            resolve(snapshot.result as T);
+            return;
+          }
+
+          fail(new Error(snapshot.error ?? "Agent stream disconnected before completion."));
+        })
+        .catch((error) => {
+          fail(
+            error instanceof Error
+              ? error
+              : new Error("Agent stream disconnected before completion.")
+          );
+        });
+    };
+  });
+}
+
+async function recoverAgentJob(
+  created: AgentJobCreatedResponse
+): Promise<AgentJobSnapshot> {
+  return getJson<AgentJobSnapshot>(created.resultPath);
+}
+
+async function postJson<T>(
+  path: string,
+  input: unknown,
+  context: string
+): Promise<T> {
+  const response = await fetch(`${RUNNER_BASE_URL}${path}`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify(input)
+  });
+
+  if (!response.ok) {
+    throw new Error(`Runner responded with ${response.status} while ${context}.`);
+  }
+
+  return parseJsonResponse<T>(response, context);
 }
 
 async function parseJsonResponse<T>(response: Response, context: string): Promise<T> {

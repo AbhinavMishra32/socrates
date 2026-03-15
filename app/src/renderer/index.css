@@ -683,6 +683,32 @@ textarea {
   gap: 10px;
 }
 
+.construct-guide-runtime-summary,
+.construct-guide-next-action,
+.construct-guide-event-log {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 10px 11px;
+  border-radius: 12px;
+  border: 1px solid var(--border);
+  background: color-mix(in srgb, var(--panel-bg) 92%, transparent);
+}
+
+.construct-guide-runtime-summary p,
+.construct-guide-next-action p,
+.construct-guide-event-item p {
+  margin: 0;
+  line-height: 1.55;
+  color: var(--text-muted);
+}
+
+.construct-guide-event-item {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
 .construct-task-result-body {
   display: flex;
   flex-direction: column;
@@ -839,7 +865,8 @@ textarea {
 }
 
 .construct-planning-questions,
-.construct-planning-results {
+.construct-planning-results,
+.construct-planning-event-log {
   display: flex;
   flex-direction: column;
   gap: 16px;

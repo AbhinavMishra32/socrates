@@ -259,6 +259,9 @@ export type GeneratedPlanStep = {
   dependsOn: string[];
   validationFocus: string[];
   suggestedFiles: string[];
+  implementationNotes: string[];
+  quizFocus: string[];
+  hiddenValidationFocus: string[];
 };
 
 export type GeneratedProjectPlan = {
@@ -286,6 +289,61 @@ export type PlanningSessionCompleteResponse = {
 export type CurrentPlanningSessionResponse = {
   session: PlanningSession | null;
   plan: GeneratedProjectPlan | null;
+};
+
+export type AgentJobCreatedResponse = {
+  jobId: string;
+  kind: "planning-questions" | "planning-plan" | "runtime-guide";
+  status: "queued" | "running" | "completed" | "failed";
+  streamPath: string;
+  resultPath: string;
+};
+
+export type AgentJobSnapshot = {
+  jobId: string;
+  kind: "planning-questions" | "planning-plan" | "runtime-guide";
+  status: "queued" | "running" | "completed" | "failed";
+  createdAt: string;
+  updatedAt: string;
+  error?: string;
+  result: unknown | null;
+};
+
+export type AgentEvent = {
+  id: string;
+  jobId: string;
+  kind: "planning-questions" | "planning-plan" | "runtime-guide";
+  stage: string;
+  title: string;
+  detail?: string;
+  level: "info" | "success" | "warning" | "error";
+  timestamp: string;
+  payload?: Record<string, unknown>;
+};
+
+export type RuntimeGuideRequest = {
+  stepId: string;
+  stepTitle: string;
+  stepSummary: string;
+  filePath: string;
+  anchorMarker: string;
+  codeSnippet: string;
+  constraints: string[];
+  tests: string[];
+  taskResult: TaskResult | null;
+  learnerModel: LearnerModel | null;
+};
+
+export type RuntimeGuideResponse = {
+  summary: string;
+  observations: string[];
+  socraticQuestions: string[];
+  hints: {
+    level1: string;
+    level2: string;
+    level3: string;
+  };
+  nextAction: string;
 };
 
 export type WorkspaceFilesEnvelope = {
