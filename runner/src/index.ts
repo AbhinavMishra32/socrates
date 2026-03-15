@@ -171,6 +171,11 @@ const server = http.createServer(async (request, response) => {
     response.writeHead(404, { "Content-Type": "application/json" });
     response.end(JSON.stringify({ error: "Not found." }));
   } catch (error) {
+    console.error(
+      `[construct-runner] ${request.method ?? "UNKNOWN"} ${request.url ?? "<unknown>"}`,
+      error
+    );
+
     const statusCode =
       error instanceof SyntaxError ||
       error instanceof BlueprintResolutionError ||

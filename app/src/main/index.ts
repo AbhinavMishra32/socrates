@@ -3,6 +3,7 @@ import path from "node:path";
 import { app, BrowserWindow } from "electron";
 
 const isDev = Boolean(process.env.VITE_DEV_SERVER_URL);
+const shouldOpenDevTools = process.env.CONSTRUCT_OPEN_DEVTOOLS === "1";
 
 function createWindow(): void {
   const window = new BrowserWindow({
@@ -19,7 +20,9 @@ function createWindow(): void {
 
   if (isDev && process.env.VITE_DEV_SERVER_URL) {
     void window.loadURL(process.env.VITE_DEV_SERVER_URL);
-    window.webContents.openDevTools({ mode: "detach" });
+    if (shouldOpenDevTools) {
+      window.webContents.openDevTools({ mode: "detach" });
+    }
     return;
   }
 
@@ -41,4 +44,3 @@ app.on("window-all-closed", () => {
     app.quit();
   }
 });
-
