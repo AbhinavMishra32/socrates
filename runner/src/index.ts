@@ -17,19 +17,23 @@ import {
   TestRunnerManager,
   loadBlueprint
 } from "./testRunner";
+import { prepareLearnerWorkspace } from "./workspaceMaterializer";
 
 const port = Number(process.env.CONSTRUCT_RUNNER_PORT ?? 43110);
 const testRunner = new TestRunnerManager();
 const rootDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
-const defaultBlueprintPath = path.join(
+const canonicalBlueprintPath = path.join(
   rootDir,
   "blueprints",
   "workflow-runtime",
   "project-blueprint.json"
 );
-const workspaceRoot = path.dirname(defaultBlueprintPath);
+const preparedWorkspace = await prepareLearnerWorkspace(canonicalBlueprintPath);
+const learnerBlueprintPath = preparedWorkspace.learnerBlueprintPath;
+const workspaceRoot = preparedWorkspace.learnerWorkspaceRoot;
 const workspaceFileManager = new WorkspaceFileManager(workspaceRoot, {
-  ignoredDirectories: ["test-fixtures"]
+  ignoredDirectories: ["test-fixtures", "tests", "__tests__"],
+  ignoredFiles: ["project-blueprint.json"]
 });
 const snapshotService = new SnapshotService(workspaceRoot);
 const taskLifecycle = new TaskLifecycleService(workspaceRoot, {
@@ -62,14 +66,14 @@ const server = http.createServer(async (request, response) => {
     }
 
     if (request.method === "GET" && request.url === "/blueprint/current") {
-      const blueprint = await loadBlueprint(defaultBlueprintPath);
+      const blueprint = await loadBlueprint(learnerBlueprintPath);
 
       response.writeHead(200, { "Content-Type": "application/json" });
       response.end(
         JSON.stringify({
           blueprint,
           workspaceRoot,
-          blueprintPath: defaultBlueprintPath
+          blueprintPath: learnerBlueprintPath
         })
       );
       return;
@@ -156,7 +160,7 @@ const server = http.createServer(async (request, response) => {
 
     if (request.method === "GET" && request.url?.startsWith("/tasks/progress")) {
       const stepId = getRequiredQueryParam(request.url, "stepId");
-      const progress = await taskLifecycle.getTaskProgress(stepId, defaultBlueprintPath);
+      const progress = await taskLifecycle.getTaskProgress(stepId, learnerBlueprintPath);
 
       response.writeHead(200, { "Content-Type": "application/json" });
       response.end(JSON.stringify(progress));

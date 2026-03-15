@@ -20,7 +20,7 @@ This file tracks the implementation phases, current status, shipped scope, and v
 | 4 | Editor UI basics & anchor navigation | Implemented | The Electron renderer now loads blueprint metadata, renders a Monaco editor and file tree, opens real workspace files, and jumps to `TASK:` anchors for selected steps. |
 | 5 | Learning Surface & Guidance Console | Implemented | Each unit now opens in a technical brief with quick checks, then transitions into a focused execution mode with a persistent guidance console, deterministic hints, and targeted task submission. |
 | 6 | Task lifecycle & telemetry | Implemented | Pre-task snapshots, persisted task attempts, learner-model updates, telemetry submission, renderer-side task lifecycle wiring, and the compact native IDE shell pass are in place. |
-| 7 | Edit tracking & anti-cheat | Implemented | Typed-versus-pasted telemetry is now enforced through a rewrite gate that blocks completion after suspicious paste-heavy passes until the learner retypes the anchored implementation. |
+| 7 | Edit tracking & anti-cheat | Implemented | Typed-versus-pasted telemetry is enforced through a rewrite gate, and the learner now works inside a materialized starter workspace where internal step tests stay hidden from the explorer. |
 | 8 | Live Guide orchestration & LLM integration | Pending | Not started. |
 | 9 | Architect static generator | Pending | Not started. |
 | 10 | Rollback UX & snapshot management | Pending | Not started. |
@@ -30,9 +30,10 @@ This file tracks the implementation phases, current status, shipped scope, and v
 
 ## Current Changeset Scope
 
-- Implement Phase 7 anti-cheat enforcement on top of the Phase 6 lifecycle.
-- Persist rewrite-gate state in the runner so suspicious paste-heavy submissions cannot earn completion even when targeted tests pass.
-- Surface verification-gate guidance in the renderer and block additional paste events while the rewrite flow is active.
+- Extend Phase 7 so Construct no longer edits the canonical solved sample project directly.
+- Materialize a learner workspace from blueprint starter files while keeping canonical step tests copied into hidden internal paths.
+- Keep targeted task execution pointed at those hidden tests so future agents can generate per-step validations without exposing them in the explorer.
+- Preserve the rewrite-gate enforcement so suspicious paste-heavy submissions still require a rewrite-from-memory pass before completion.
 - Preserve the local-only execution model. LangGraph-based guide orchestration and provider integrations remain deferred to Phase 8.
 
 ## Implemented So Far
@@ -62,6 +63,8 @@ This file tracks the implementation phases, current status, shipped scope, and v
 - Phase 6 IDE shell and task experience: [`/Users/abhinavmishra/solin/socrates/app/src/renderer/App.tsx`](/Users/abhinavmishra/solin/socrates/app/src/renderer/App.tsx) and [`/Users/abhinavmishra/solin/socrates/app/src/renderer/index.css`](/Users/abhinavmishra/solin/socrates/app/src/renderer/index.css).
 - Phase 7 rewrite-gate enforcement: [`/Users/abhinavmishra/solin/socrates/runner/src/taskLifecycle.ts`](/Users/abhinavmishra/solin/socrates/runner/src/taskLifecycle.ts), [`/Users/abhinavmishra/solin/socrates/runner/src/taskLifecycle.test.ts`](/Users/abhinavmishra/solin/socrates/runner/src/taskLifecycle.test.ts), and [`/Users/abhinavmishra/solin/socrates/pkg/shared/src/schemas.ts`](/Users/abhinavmishra/solin/socrates/pkg/shared/src/schemas.ts).
 - Phase 7 renderer verification UI and paste blocking: [`/Users/abhinavmishra/solin/socrates/app/src/renderer/App.tsx`](/Users/abhinavmishra/solin/socrates/app/src/renderer/App.tsx), [`/Users/abhinavmishra/solin/socrates/app/src/renderer/index.css`](/Users/abhinavmishra/solin/socrates/app/src/renderer/index.css), and [`/Users/abhinavmishra/solin/socrates/app/src/renderer/types.ts`](/Users/abhinavmishra/solin/socrates/app/src/renderer/types.ts).
+- Phase 7 learner workspace materialization and hidden test surface: [`/Users/abhinavmishra/solin/socrates/runner/src/workspaceMaterializer.ts`](/Users/abhinavmishra/solin/socrates/runner/src/workspaceMaterializer.ts), [`/Users/abhinavmishra/solin/socrates/runner/src/index.ts`](/Users/abhinavmishra/solin/socrates/runner/src/index.ts), and [`/Users/abhinavmishra/solin/socrates/runner/src/fileManager.ts`](/Users/abhinavmishra/solin/socrates/runner/src/fileManager.ts).
+- Phase 7 learner workspace regression coverage: [`/Users/abhinavmishra/solin/socrates/runner/src/workspaceMaterializer.test.ts`](/Users/abhinavmishra/solin/socrates/runner/src/workspaceMaterializer.test.ts) and [`/Users/abhinavmishra/solin/socrates/runner/src/fileManager.test.ts`](/Users/abhinavmishra/solin/socrates/runner/src/fileManager.test.ts).
 
 ## Verification
 
@@ -89,6 +92,7 @@ This file tracks the implementation phases, current status, shipped scope, and v
 - Passed: `pnpm --filter @construct/shared build`.
 - Passed: `pnpm --filter @construct/runner build`.
 - Passed: Node `v25.4.0` verification sweep covering shared typecheck/build, runner typecheck/test/task execution/build, and app typecheck/build/test.
+- Passed: learner-workspace sanity check confirmed the visible explorer surface excludes `tests/` and the materialized [`/Users/abhinavmishra/solin/socrates/blueprints/workflow-runtime/.construct/workspaces/construct.workflow-runtime.v1/src/state.ts`](/Users/abhinavmishra/solin/socrates/blueprints/workflow-runtime/.construct/workspaces/construct.workflow-runtime.v1/src/state.ts) contains the starter `throw new Error('Implement mergeState')` implementation instead of the canonical solved code.
 - Note: the default shell runtime in this workspace still points at Node `v20.19.5`, so Phase 7 verification currently relies on switching to a newer local Node with `node:sqlite` support.
 - Not run in this sandbox: a bind-based smoke test for the HTTP endpoint, because local listen attempts from the test process hit `EPERM`.
 - Pending: `pnpm dev` smoke check for the Electron app and runner.

@@ -30,12 +30,14 @@ export class WorkspacePathError extends Error {
 export class WorkspaceFileManager {
   private readonly workspaceRoot: string;
   private readonly ignoredDirectories: Set<string>;
+  private readonly ignoredFiles: Set<string>;
   private readonly workspaceRealRootPromise: Promise<string>;
 
   constructor(
     workspaceRoot: string,
     options?: {
       ignoredDirectories?: string[];
+      ignoredFiles?: string[];
     }
   ) {
     this.workspaceRoot = path.resolve(workspaceRoot);
@@ -43,6 +45,7 @@ export class WorkspaceFileManager {
       ...DEFAULT_IGNORED_DIRECTORIES,
       ...(options?.ignoredDirectories ?? [])
     ]);
+    this.ignoredFiles = new Set(options?.ignoredFiles ?? []);
     this.workspaceRealRootPromise = realpath(this.workspaceRoot);
   }
 
@@ -96,6 +99,10 @@ export class WorkspaceFileManager {
         }
 
         if (directoryEntry.isDirectory() && this.ignoredDirectories.has(directoryEntry.name)) {
+          continue;
+        }
+
+        if (directoryEntry.isFile() && this.ignoredFiles.has(directoryEntry.name)) {
           continue;
         }
 

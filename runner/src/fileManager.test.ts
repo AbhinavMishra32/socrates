@@ -10,12 +10,15 @@ test("WorkspaceFileManager reads, writes, creates, and lists files within the wo
   const workspaceRoot = await mkdtemp(path.join(os.tmpdir(), "construct-file-manager-"));
 
   try {
-    const fileManager = new WorkspaceFileManager(workspaceRoot);
+    const fileManager = new WorkspaceFileManager(workspaceRoot, {
+      ignoredFiles: ["project-blueprint.json"]
+    });
 
     await fileManager.writeFile("src/index.ts", "export const phase = 2;\n");
     await fileManager.createFile("README.md", "# Construct Workspace\n");
     await mkdir(path.join(workspaceRoot, ".construct"), { recursive: true });
     await writeFile(path.join(workspaceRoot, ".construct", "internal.txt"), "ignored\n");
+    await writeFile(path.join(workspaceRoot, "project-blueprint.json"), "{}\n");
 
     await assert.rejects(
       fileManager.createFile("README.md", "# Duplicate\n"),
@@ -55,4 +58,3 @@ test("WorkspaceFileManager rejects path escapes, including symlinks that resolve
     await rm(outsideRoot, { recursive: true, force: true });
   }
 });
-
