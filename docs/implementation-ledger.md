@@ -21,7 +21,7 @@ This file tracks the implementation phases, current status, shipped scope, and v
 | 5 | Learning Surface & Guidance Console | Implemented | Each unit now opens in a technical brief with quick checks, then transitions into a focused execution mode with a persistent guidance console, deterministic hints, and targeted task submission. |
 | 6 | Task lifecycle & telemetry | Implemented | Pre-task snapshots, persisted task attempts, learner-model updates, telemetry submission, renderer-side task lifecycle wiring, and the compact native IDE shell pass are in place. |
 | 7 | Edit tracking & anti-cheat | Implemented | Typed-versus-pasted telemetry is enforced through a rewrite gate, and the learner now works inside a materialized starter workspace where internal step tests stay hidden from the explorer. |
-| 8 | Live Guide orchestration & LLM integration | In progress | Real agent foundations are now live: LangGraph job orchestration, OpenAI Responses structured outputs, Tavily-backed research, SSE activity streaming, persisted user knowledge, and a runtime Guide endpoint. Full arbitrary codebase emission and generated blueprint synthesis are still pending. |
+| 8 | Live Guide orchestration & LLM integration | In progress | Real agent foundations are now live: LangGraph job orchestration, the LangChain OpenAI provider, Tavily-backed research, SSE activity streaming, persisted user knowledge, prompt compaction for structured plan generation, and a runtime Guide endpoint. Full arbitrary codebase emission and generated blueprint synthesis are still pending. |
 | 9 | Architect static generator | Pending | Not started. |
 | 10 | Rollback UX & snapshot management | Pending | Not started. |
 | 11 | Multi-language adapters | Pending | Not started. |
@@ -31,7 +31,7 @@ This file tracks the implementation phases, current status, shipped scope, and v
 ## Current Changeset Scope
 
 - Replace the previously hardcoded planner path with a real agent runtime in the runner.
-- Add provider-controlled OpenAI integration using the Responses API with structured outputs and `gpt-5-codex` as the default model alias.
+- Add provider-controlled OpenAI integration through the LangChain OpenAI provider with structured outputs and `gpt-5.4` as the current default planning model.
 - Add Tavily-backed architecture research behind a swappable search-provider boundary.
 - Add LangGraph-backed planning/runtime graphs for question generation, personalized roadmap generation, and live runtime guidance.
 - Add SSE job streaming so the renderer can show what the agent is doing while it researches and plans.
@@ -112,6 +112,7 @@ This file tracks the implementation phases, current status, shipped scope, and v
 - Passed: `pnpm --filter @construct/app test`.
 - Passed: `pnpm --filter @construct/shared build`.
 - Passed: Node `v25.4.0` verification sweep covering shared typecheck/build, runner typecheck/test/task execution/build, and app typecheck/build/test.
+- Passed: LangChain OpenAI provider migration verification through `pnpm install`, `PATH="$HOME/.nvm/versions/node/v25.4.0/bin:$PATH" pnpm --filter @construct/runner typecheck`, `PATH="$HOME/.nvm/versions/node/v25.4.0/bin:$PATH" pnpm --filter @construct/runner build`, and `PATH="$HOME/.nvm/versions/node/v25.4.0/bin:$PATH" pnpm --filter @construct/runner test`.
 - Passed: learner-workspace sanity check confirmed the visible explorer surface excludes `tests/` and the materialized [`/Users/abhinavmishra/solin/socrates/blueprints/workflow-runtime/.construct/workspaces/construct.workflow-runtime.v1/src/state.ts`](/Users/abhinavmishra/solin/socrates/blueprints/workflow-runtime/.construct/workspaces/construct.workflow-runtime.v1/src/state.ts) contains the starter `throw new Error('Implement mergeState')` implementation instead of the canonical solved code.
 - Note: the default shell runtime in this workspace still points at Node `v20.19.5`, so Phase 7 verification currently relies on switching to a newer local Node with `node:sqlite` support.
 - Not run in this sandbox: a bind-based smoke test for the HTTP endpoint, because local listen attempts from the test process hit `EPERM`.
@@ -120,6 +121,7 @@ This file tracks the implementation phases, current status, shipped scope, and v
 ## Blockers
 
 - The agent foundation is real now, but Construct still does not yet emit a canonical runnable codebase and masked learner blueprint for arbitrary goals. Phase 8 currently stops at provider-backed planning, knowledge profiling, research, SSE activity streaming, and runtime guidance.
+- The current agent fix hardens structured plan generation by compacting learner/history/research context before asking for a schema-constrained roadmap, but we still need explicit retry/fallback handling when model output does not satisfy the schema on the first attempt.
 - The real agent stack requires `OPENAI_API_KEY` and `TAVILY_API_KEY` in the runner environment. Provider choice remains developer-controlled through environment configuration, not end-user UI.
 
 ## Next Phase

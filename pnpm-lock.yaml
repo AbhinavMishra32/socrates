@@ -124,12 +124,12 @@ importers:
       '@langchain/langgraph':
         specifier: ^1.2.2
         version: 1.2.2(@langchain/core@1.1.32(openai@6.29.0(zod@3.25.76)))(react-dom@19.2.4(react@19.2.4))(react@19.2.4)(zod@3.25.76)
+      '@langchain/openai':
+        specifier: ^1.0.7
+        version: 1.2.13(@langchain/core@1.1.32(openai@6.29.0(zod@3.25.76)))
       '@tavily/core':
         specifier: ^0.7.2
         version: 0.7.2
-      openai:
-        specifier: ^6.29.0
-        version: 6.29.0(zod@3.25.76)
       zod:
         specifier: ^3.25.76
         version: 3.25.76
@@ -802,6 +802,12 @@ packages:
     peerDependenciesMeta:
       zod-to-json-schema:
         optional: true
+
+  '@langchain/openai@1.2.13':
+    resolution: {integrity: sha512-zyspKSBnyxICxZyGYMxsSkCUJR09Uj1omMGBrUsvpSu9j+zIbfNg4+NQTIRmnzULoKB+keaioOdLGHxOQru3+w==}
+    engines: {node: '>=20'}
+    peerDependencies:
+      '@langchain/core': ^1.1.32
 
   '@monaco-editor/loader@1.7.0':
     resolution: {integrity: sha512-gIwR1HrJrrx+vfyOhYmCZ0/JcWqG5kbfG7+d3f/C1LXk2EvzAbHSg3MQ5lO2sMlo9izoAZ04shohfKLVT6crVA==}
@@ -3391,6 +3397,15 @@ snapshots:
       - react-dom
       - svelte
       - vue
+
+  '@langchain/openai@1.2.13(@langchain/core@1.1.32(openai@6.29.0(zod@3.25.76)))':
+    dependencies:
+      '@langchain/core': 1.1.32(openai@6.29.0(zod@3.25.76))
+      js-tiktoken: 1.0.21
+      openai: 6.29.0(zod@3.25.76)
+      zod: 3.25.76
+    transitivePeerDependencies:
+      - ws
 
   '@monaco-editor/loader@1.7.0':
     dependencies:

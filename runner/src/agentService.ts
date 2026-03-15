@@ -5,6 +5,7 @@ import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 
 import { Annotation, END, START, StateGraph } from "@langchain/langgraph";
+import { ChatOpenAI } from "@langchain/openai";
 import {
   AgentEventSchema,
   AgentJobCreatedResponseSchema,
@@ -38,10 +39,10 @@ import {
   type PlanningSessionStartResponse,
   type RuntimeGuideRequest,
   type RuntimeGuideResponse,
+  type StoredKnowledgeConcept,
+  type StoredKnowledgeGoal,
   type UserKnowledgeBase
 } from "@construct/shared";
-import OpenAI from "openai";
-import { zodTextFormat } from "openai/helpers/zod";
 import { tavily } from "@tavily/core";
 import { z } from "zod";
 
@@ -99,6 +100,8 @@ type StructuredLanguageModel = {
     schemaName: string;
     instructions: string;
     prompt: string;
+    maxOutputTokens?: number;
+    verbosity?: "low" | "medium" | "high";
   }): Promise<z.infer<T>>;
 };
 
@@ -499,12 +502,14 @@ export class ConstructAgentService {
               {
                 goal: state.request.goal,
                 learningStyle: state.request.learningStyle,
-                priorKnowledge: state.knowledgeBase,
-                research: state.research
+                priorKnowledge: compactKnowledgeBase(state.knowledgeBase),
+                research: compactResearchDigest(state.research)
               },
               null,
               2
-            )
+            ),
+            maxOutputTokens: 2_500,
+            verbosity: "medium"
           });
 
           return this.buildPlanningSession(state.request, questionDraft);
@@ -578,12 +583,14 @@ export class ConstructAgentService {
               {
                 session: state.session,
                 answers: state.request.answers,
-                priorKnowledge: state.knowledgeBase,
-                research: state.research
+                priorKnowledge: compactKnowledgeBase(state.knowledgeBase),
+                research: compactResearchDigest(state.research)
               },
               null,
               2
-            )
+            ),
+            maxOutputTokens: 16_000,
+            verbosity: "medium"
           });
 
           const plan = this.buildGeneratedPlan(state.session, planDraft);
@@ -644,11 +651,13 @@ export class ConstructAgentService {
             prompt: JSON.stringify(
               {
                 request: state.request,
-                priorKnowledge: state.knowledgeBase
+                priorKnowledge: compactKnowledgeBase(state.knowledgeBase)
               },
               null,
               2
-            )
+            ),
+            maxOutputTokens: 3_000,
+            verbosity: "medium"
           });
         })
       }))
@@ -841,13 +850,19 @@ export class ConstructAgentService {
 }
 
 class OpenAIStructuredLanguageModel implements StructuredLanguageModel {
-  private readonly client: OpenAI;
+  private readonly client: ChatOpenAI;
   private readonly model: string;
 
   constructor(input: { apiKey: string; baseUrl?: string; model: string }) {
-    this.client = new OpenAI({
+    this.client = new ChatOpenAI({
       apiKey: input.apiKey,
-      baseURL: input.baseUrl
+      model: input.model,
+      temperature: 0,
+      configuration: input.baseUrl
+        ? {
+            baseURL: input.baseUrl
+          }
+        : undefined
     });
     this.model = input.model;
   }
@@ -857,27 +872,27 @@ class OpenAIStructuredLanguageModel implements StructuredLanguageModel {
     schemaName: string;
     instructions: string;
     prompt: string;
+    maxOutputTokens?: number;
+    verbosity?: "low" | "medium" | "high";
   }): Promise<z.infer<T>> {
-    const response = await this.client.responses.parse({
-      model: this.model,
-      instructions: input.instructions,
-      input: input.prompt,
-      max_output_tokens: 4_000,
-      reasoning: {
-        effort: "medium",
-        summary: "auto"
-      },
-      text: {
-        format: zodTextFormat(input.schema, input.schemaName),
-        verbosity: "high"
-      }
+    const structuredModel = this.client.withStructuredOutput(input.schema, {
+      name: input.schemaName,
+      method: "jsonSchema"
     });
+    const response = await structuredModel.invoke([
+      [
+        "system",
+        [
+          input.instructions,
+          "Return only data that satisfies the requested schema.",
+          `Keep the response concise and fit within ${input.maxOutputTokens ?? 4_000} output tokens.`,
+          `Preferred verbosity: ${input.verbosity ?? "medium"}.`
+        ].join("\n\n")
+      ],
+      ["user", input.prompt]
+    ]);
 
-    if (!response.output_parsed) {
-      throw new Error(`OpenAI returned no parsed output for ${input.schemaName}.`);
-    }
-
-    return input.schema.parse(response.output_parsed);
+    return input.schema.parse(response);
   }
 }
 
@@ -959,7 +974,7 @@ function resolveAgentConfig(): AgentConfig {
     searchProvider,
     openAiApiKey,
     openAiBaseUrl: process.env.CONSTRUCT_OPENAI_BASE_URL?.trim(),
-    openAiModel: process.env.CONSTRUCT_OPENAI_MODEL?.trim() || "gpt-5-codex",
+    openAiModel: process.env.CONSTRUCT_OPENAI_MODEL?.trim() || "gpt-5.4",
     tavilyApiKey,
     tavilySearchDepth:
       (process.env.CONSTRUCT_TAVILY_SEARCH_DEPTH?.trim() as
@@ -969,6 +984,77 @@ function resolveAgentConfig(): AgentConfig {
         | "ultra-fast"
         | undefined) ?? "advanced"
   };
+}
+
+function compactKnowledgeBase(knowledgeBase: UserKnowledgeBase): {
+  updatedAt: string;
+  concepts: Array<Pick<
+    StoredKnowledgeConcept,
+    "id" | "label" | "category" | "confidence" | "rationale" | "updatedAt"
+  >>;
+  goals: Array<Pick<StoredKnowledgeGoal, "goal" | "language" | "domain" | "lastPlannedAt">>;
+} {
+  return {
+    updatedAt: knowledgeBase.updatedAt,
+    concepts: knowledgeBase.concepts
+      .slice()
+      .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt))
+      .slice(0, 20)
+      .map((concept) => ({
+        id: concept.id,
+        label: concept.label,
+        category: concept.category,
+        confidence: concept.confidence,
+        rationale: truncateText(concept.rationale, 220),
+        updatedAt: concept.updatedAt
+      })),
+    goals: knowledgeBase.goals
+      .slice()
+      .sort((left, right) => right.lastPlannedAt.localeCompare(left.lastPlannedAt))
+      .slice(0, 10)
+      .map((goal) => ({
+        goal: truncateText(goal.goal, 180),
+        language: goal.language,
+        domain: goal.domain,
+        lastPlannedAt: goal.lastPlannedAt
+      }))
+  };
+}
+
+function compactResearchDigest(
+  research: ResearchDigest | null
+): {
+  query: string;
+  answer?: string;
+  sources: Array<{
+    title: string;
+    url: string;
+    snippet: string;
+    publishedDate?: string;
+  }>;
+} | null {
+  if (!research) {
+    return null;
+  }
+
+  return {
+    query: truncateText(research.query, 220),
+    answer: research.answer ? truncateText(research.answer, 800) : undefined,
+    sources: research.sources.slice(0, 5).map((source) => ({
+      title: truncateText(source.title, 140),
+      url: source.url,
+      snippet: truncateText(source.snippet, 320),
+      publishedDate: source.publishedDate
+    }))
+  };
+}
+
+function truncateText(value: string, maxLength: number): string {
+  if (value.length <= maxLength) {
+    return value;
+  }
+
+  return `${value.slice(0, Math.max(0, maxLength - 1)).trimEnd()}…`;
 }
 
 function emptyKnowledgeBase(now: () => Date): UserKnowledgeBase {
