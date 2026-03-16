@@ -207,6 +207,7 @@ type PlanGraphState = {
   validationResearch: ResearchDigest | null;
   mergedResearch: ResearchDigest | null;
   plan: GeneratedProjectPlan | null;
+  blueprintDraft: GeneratedBlueprintBundleDraft | null;
   activeBlueprintPath: string | null;
 };
 
@@ -390,6 +391,10 @@ const GENERATED_BLUEPRINT_BUNDLE_DRAFT_SCHEMA = z.object({
   steps: z.array(GENERATED_BLUEPRINT_STEP_DRAFT_SCHEMA).min(1),
   dependencyGraph: DependencyGraphSchema,
   tags: z.array(z.string().min(1))
+});
+
+const LESSON_AUTHORED_BLUEPRINT_DRAFT_SCHEMA = z.object({
+  steps: z.array(GENERATED_BLUEPRINT_STEP_DRAFT_SCHEMA).min(1)
 });
 
 const GENERATED_DEEP_DIVE_DRAFT_SCHEMA = z.object({
@@ -1083,6 +1088,7 @@ export class ConstructAgentService {
       validationResearch: Annotation<ResearchDigest | null>(),
       mergedResearch: Annotation<ResearchDigest | null>(),
       plan: Annotation<GeneratedProjectPlan | null>(),
+      blueprintDraft: Annotation<GeneratedBlueprintBundleDraft | null>(),
       activeBlueprintPath: Annotation<string | null>()
     });
 
@@ -1190,7 +1196,7 @@ export class ConstructAgentService {
         })
       }))
       .addNode("generateBlueprint", async (state) => ({
-        activeBlueprintPath: await this.withStage(jobId, "blueprint-generation", "Generating the runnable project blueprint", "Construct is generating the canonical project, masked learner files, and hidden tests for the personalized path.", async () => {
+        blueprintDraft: await this.withStage(jobId, "blueprint-generation", "Generating the runnable project blueprint", "Construct is generating the canonical project, masked learner files, and hidden tests for the personalized path.", async () => {
           if (!state.plan) {
             throw new Error("Cannot generate a blueprint before the project plan exists.");
           }
@@ -1275,7 +1281,119 @@ export class ConstructAgentService {
             stepCount: bundleDraft.steps.length
           });
 
-          return this.persistGeneratedBlueprint(jobId, state.session, state.plan, bundleDraft);
+          return bundleDraft;
+        })
+      }))
+      .addNode("authorLessons", async (state) => ({
+        blueprintDraft: await this.withStage(jobId, "lesson-authoring", "Writing the lesson chapters", "The Architect is turning each step into a docs-style lesson with substantial markdown explanations, grounded checks, and a clear implementation handoff.", async () => {
+          if (!state.plan) {
+            throw new Error("Cannot author lessons before the project plan exists.");
+          }
+
+          if (!state.blueprintDraft) {
+            throw new Error("Cannot author lessons before the blueprint draft exists.");
+          }
+
+          const lessonAuthoringContext = {
+            stepCount: state.blueprintDraft.steps.length,
+            firstStepTitle: state.blueprintDraft.steps[0]?.title ?? null,
+            firstStepSlideCount: state.blueprintDraft.steps[0]?.lessonSlides.length ?? 0,
+            firstStepCheckCount: state.blueprintDraft.steps[0]?.checks.length ?? 0
+          };
+
+          const job = this.jobs.get(jobId);
+          if (job) {
+            this.emitEvent(job, {
+              stage: "lesson-authoring",
+              title: "Writing the lesson chapters",
+              detail: "The Architect is rewriting each step as a docs-style chapter so the learner is taught clearly before any checks or code tasks.",
+              level: "info",
+              payload: lessonAuthoringContext
+            });
+          }
+          this.logger.info("Submitting lesson authoring request.", {
+            jobId,
+            sessionId: state.session.sessionId,
+            goal: state.session.goal,
+            ...lessonAuthoringContext
+          });
+
+          const stream = this.createModelStreamForwarder(
+            jobId,
+            "lesson-authoring",
+            "lesson chapter authoring"
+          );
+
+          const authoredDraft = await this.getLlm().parse({
+            schema: LESSON_AUTHORED_BLUEPRINT_DRAFT_SCHEMA,
+            schemaName: "construct_authored_blueprint_lessons",
+            instructions: buildLessonAuthoringInstructions(),
+            prompt: JSON.stringify(
+              {
+                session: state.session,
+                goalScope: state.goalScope,
+                answers: resolvedAnswers,
+                plan: state.plan,
+                priorKnowledge: compactKnowledgeBase(state.knowledgeBase),
+                research: compactResearchDigest(state.mergedResearch),
+                blueprintDraft: state.blueprintDraft,
+                lessonAuthoringBrief: buildLessonAuthoringBrief(state.blueprintDraft)
+              },
+              null,
+              2
+            ),
+            maxOutputTokens: 18_000,
+            verbosity: "high",
+            stream
+          }).finally(() => {
+            stream.onComplete?.();
+          });
+
+          const nextBlueprintDraft = mergeLessonAuthoredBlueprintDraft(
+            state.blueprintDraft,
+            authoredDraft.steps
+          );
+
+          if (job) {
+            this.emitEvent(job, {
+              stage: "lesson-authoring",
+              title: "Lesson chapters ready",
+              detail: "The Architect has expanded the teaching content into richer markdown chapters and aligned the checks with what was actually taught.",
+              level: "success",
+              payload: {
+                stepCount: nextBlueprintDraft.steps.length,
+                firstStepSlideCount: nextBlueprintDraft.steps[0]?.lessonSlides.length ?? 0,
+                firstStepCheckCount: nextBlueprintDraft.steps[0]?.checks.length ?? 0
+              }
+            });
+          }
+          this.logger.info("Received lesson authoring response.", {
+            jobId,
+            sessionId: state.session.sessionId,
+            stepCount: nextBlueprintDraft.steps.length,
+            firstStepSlideCount: nextBlueprintDraft.steps[0]?.lessonSlides.length ?? 0,
+            firstStepCheckCount: nextBlueprintDraft.steps[0]?.checks.length ?? 0
+          });
+
+          return nextBlueprintDraft;
+        })
+      }))
+      .addNode("persistBlueprint", async (state) => ({
+        activeBlueprintPath: await this.withStage(jobId, "blueprint-materialization", "Materializing the generated project", "Construct is writing the authored lessons, canonical project, learner workspace, and hidden tests into the active project.", async () => {
+          if (!state.plan) {
+            throw new Error("Cannot persist a blueprint before the project plan exists.");
+          }
+
+          if (!state.blueprintDraft) {
+            throw new Error("Cannot persist a blueprint before the lesson-authored draft exists.");
+          }
+
+          return this.persistGeneratedBlueprint(
+            jobId,
+            state.session,
+            state.plan,
+            state.blueprintDraft
+          );
         })
       }))
       .addEdge(START, "loadKnowledgeBase")
@@ -1288,7 +1406,9 @@ export class ConstructAgentService {
       .addEdge("researchValidation", "mergeResearch")
       .addEdge("mergeResearch", "generatePlan")
       .addEdge("generatePlan", "generateBlueprint")
-      .addEdge("generateBlueprint", END)
+      .addEdge("generateBlueprint", "authorLessons")
+      .addEdge("authorLessons", "persistBlueprint")
+      .addEdge("persistBlueprint", END)
       .compile();
 
     const result = await graph.invoke({
@@ -1302,6 +1422,7 @@ export class ConstructAgentService {
       validationResearch: null,
       mergedResearch: null,
       plan: null,
+      blueprintDraft: null,
       activeBlueprintPath: null
     });
 
@@ -3185,6 +3306,16 @@ function normalizeDraftLessonSlides(
       continue;
     }
 
+    const markdownDividerFragments = prepared
+      .split(/\n\s*---+\s*\n/g)
+      .map((fragment) => fragment.trim())
+      .filter(Boolean);
+
+    if (markdownDividerFragments.length >= 2) {
+      normalizedSlides.push(...markdownDividerFragments);
+      continue;
+    }
+
     normalizedSlides.push(prepared);
   }
 
@@ -3203,6 +3334,18 @@ function normalizeGeneratedBlueprintDraft(
   };
 }
 
+function mergeLessonAuthoredBlueprintDraft(
+  draft: GeneratedBlueprintBundleDraft,
+  authoredSteps: GeneratedBlueprintBundleDraft["steps"]
+): GeneratedBlueprintBundleDraft {
+  const authoredStepMap = new Map(authoredSteps.map((step) => [step.id, step]));
+
+  return normalizeGeneratedBlueprintDraft({
+    ...draft,
+    steps: draft.steps.map((step) => authoredStepMap.get(step.id) ?? step)
+  });
+}
+
 function normalizeGeneratedBlueprintSteps(
   steps: GeneratedBlueprintBundleDraft["steps"]
 ): ProjectBlueprint["steps"] {
@@ -3219,6 +3362,42 @@ function normalizeGeneratedBlueprintSteps(
       checks: normalizeGeneratedChecks(step.checks)
     })
   );
+}
+
+function buildLessonAuthoringBrief(
+  blueprintDraft: GeneratedBlueprintBundleDraft
+): Array<{
+  id: string;
+  title: string;
+  summary: string;
+  concepts: string[];
+  implementationTarget: {
+    file: string;
+    anchor: string;
+    tests: string[];
+  };
+  teachingNeeds: {
+    existingSlideCount: number;
+    checkPrompts: string[];
+    exerciseSummary: string;
+  };
+}> {
+  return blueprintDraft.steps.map((step) => ({
+    id: step.id,
+    title: step.title,
+    summary: step.summary,
+    concepts: step.concepts,
+    implementationTarget: {
+      file: step.anchor.file,
+      anchor: step.anchor.marker,
+      tests: step.tests
+    },
+    teachingNeeds: {
+      existingSlideCount: step.lessonSlides.length,
+      checkPrompts: step.checks.map((check) => check.prompt),
+      exerciseSummary: truncateText(step.doc, 320)
+    }
+  }));
 }
 
 function normalizeGeneratedChecks(
@@ -3424,7 +3603,9 @@ function buildBlueprintGenerationInstructions(): string {
     "lessonSlides are the main teaching surface. Write them like a real course lesson in markdown, not like a checklist of instructions.",
     "Teach the required concept from the learner's current level so they can actually solve the task afterward. Use rich markdown prose, bullet lists, ordered lists, blockquotes, horizontal rules, tables when useful, and fenced code snippets when helpful.",
     "lessonSlides should teach the concept in markdown before the task begins. Emit each slide as its own array entry. Do not collapse multiple slides into one string.",
+    "Each slide should usually teach one primary concept or one tightly related concept cluster. The next slide should move to the next concept the learner needs for the project.",
     "The first step must open with at least three real teaching slides unless the user explicitly asked for setup/tooling rather than implementation.",
+    "Do not treat a slide like a presenter note or splash card. A slide should feel like a real docs page section that teaches a concept thoroughly enough for the learner to use it in the exercise.",
     "The first step should teach and implement the first meaningful code behavior or design decision, not environment setup or package scaffolding.",
     "Do not generate a first step about pinning versions, creating a venv, installing test tools, package metadata, or generic project layout unless the user's goal explicitly asks for that.",
     "lessonSlides must explain the why and how of the concept. They should not mainly say what the learner has to do next.",
@@ -3432,9 +3613,13 @@ function buildBlueprintGenerationInstructions(): string {
     "Do not start slides with 'Step 1', 'Step 2', or by repeating the step title as a markdown heading. The UI already shows course and step context.",
     "Avoid giant title-only slides. Prefer explanation-rich markdown that reads like technical documentation or a high-quality lesson chapter.",
     "Each slide should usually be substantial, not tiny. For non-trivial steps, most slides should feel like a docs section: multiple paragraphs plus at least one concrete structure such as a list, example, code sketch, comparison table, or callout.",
+    "Most slides should include at least two markdown subheadings such as `## Why this matters`, `## How it works`, `## Example`, `## Common mistakes`, or `## How this helps in the exercise`.",
     "For the first step and for any brand-new concept, it is usually better to generate 3-5 substantial markdown slides than 1-2 shallow ones.",
     "When a concept is new or foundational, a single slide should often contain roughly 180-350 words of explanation unless the concept is genuinely small.",
+    "If a slide is only one short paragraph, it is almost certainly too shallow. Expand it into a real explanation with multiple sections.",
     "Explain the mental model, the important APIs or language features involved, the invariants/constraints, common mistakes, and the exact behavior the later exercise will require.",
+    "Whenever a concept will matter in code, include a worked example or conceptual code fence that shows the idea in action without dumping the full final solution.",
+    "Close most slides by connecting the concept back to the upcoming task so the learner understands how the explanation will help them implement.",
     "Use code fences for conceptual sketches and worked examples when helpful, but do not dump the full solution into the lesson.",
     "Do not make slides read like flash cards, presenter notes, or splash screens. They should read like polished technical documentation written to teach, not to decorate.",
     "The learner should be able to read the slides alone and understand why the implementation is structured the way it is before reaching the task.",
@@ -3454,6 +3639,47 @@ function buildBlueprintGenerationInstructions(): string {
     "Choose build order from true project dependencies and the learner profile, not a generic tutorial order.",
     "For TypeScript and JavaScript projects, generate Jest tests and the minimum package/tooling files required to run them.",
     "Do not emit placeholder prose instead of code. Return concrete file contents."
+  ].join("\n");
+}
+
+function buildLessonAuthoringInstructions(): string {
+  return [
+    "You are Construct's Architect agent.",
+    "You are in the lesson-authoring phase of project generation.",
+    "The project structure, learner files, hidden tests, anchors, and overall step order already exist.",
+    "Your job is to rewrite the step teaching content so each step reads like a serious docs chapter before the learner reaches checks or code.",
+    "Return only the authored steps. Keep each step id, anchor, tests, concepts, constraints, difficulty, and implementation focus aligned to the existing blueprint draft.",
+    "The answers payload includes the original question, the available options, and either a selected option or a custom freeform learner response. Use that context to decide how much to explain, what examples to choose, and where to slow down.",
+    "For each step, rewrite lessonSlides, doc, and checks so they match the learner's level and the real code task.",
+    "lessonSlides must be rich markdown and should read like documentation or a high-quality course chapter.",
+    "Each slide should be its own markdown document. Do not collapse multiple slides into one string.",
+    "Treat each slide as a docs page section for one concept the learner must understand before implementing the task.",
+    "Use markdown structure deliberately: headings, paragraphs, bullet lists, ordered lists, blockquotes, tables when helpful, and fenced code blocks for worked examples or conceptual sketches.",
+    "Do not repeat the step title as the main heading of every slide. The UI already shows step context.",
+    "Avoid shallow slides. Most non-trivial slides should feel like a docs section with real explanation, not a caption or summary card.",
+    "Do not write single-heading slides with a short paragraph underneath. That is too shallow for Construct.",
+    "A good slide usually explains the mental model, why it matters in this project, the important API or language behavior, common mistakes, and how that idea shows up in the upcoming implementation.",
+    "Within a step, different slides should usually cover different required concepts. Do not use consecutive slides to repeat the same short summary.",
+    "When a step introduces a new concept, write enough for a learner to understand it without having to infer missing background.",
+    "For most real implementation steps, each slide should contain multiple paragraphs and at least one supporting structure such as a list, comparison, callout, or fenced code example.",
+    "Most slides should also contain at least two markdown section headings such as `## Why this matters`, `## How it works`, `## Example`, `## Common mistakes`, `## Step-by-step reasoning`, or `## How this maps to the exercise`.",
+    "A strong slide should usually feel like this: introduce the concept, explain why it matters here, walk through a concrete example, warn about a common mistake, then bridge directly into how the learner will use it in the task.",
+    "If a concept deserves docs-level treatment, do not compress it into one paragraph. Expand it until the learner can read the slide alone and understand the idea.",
+    "If the learner is a beginner in this concept, hand-hold. Explain assumptions, define the terms you use, and spell out the reasoning instead of expecting them to infer it.",
+    "When the exercise depends on a language feature or API, explicitly teach that feature or API in the slide itself with an example before the learner reaches the check.",
+    "If a slide is mostly summary text, rewrite it into a richer chapter section with clearer headings and more explanation.",
+    "Most foundational slides should land around 220-450 words unless the concept is genuinely tiny.",
+    "If a later check asks about a concept like a __main__ guard, idempotent state, or a CLI entrypoint, the lesson slides must explicitly teach that concept first.",
+    "Do not ask trivia or recall questions. Checks should confirm understanding of what the lesson actually taught.",
+    "Use fewer, stronger checks. The first step should usually have 1 or 2 grounded checks, not a scatter of thin ones.",
+    "The doc field should become a crisp implementation handoff. It should explain exactly what file or anchor is being changed, what behavior to implement, and what the tests are verifying. It should not re-teach the whole lesson.",
+    "For the first step and any foundational step, prefer 3 to 6 substantial slides unless the concept is genuinely tiny.",
+    "Before the first check in the first step, there should usually be at least two concept-heavy slides and often three or more.",
+    "Slides should look good when rendered as docs. Use markdown headings inside slides to break the explanation into sections such as 'Why this matters', 'How it works', 'Example', 'Common mistakes', or 'How this helps in the task'.",
+    "Do not move to checks after a single summary slide unless the concept is truly trivial. In most real steps, the learner should read multiple substantial docs-style slides before the first check.",
+    "The learner should finish a slide feeling taught, not merely informed. Write with the intent of making them capable of succeeding in the exercise immediately afterward.",
+    "If the current draft already contains useful material, expand and refine it instead of discarding the implementation intent.",
+    "Do not alter the code files or hidden tests. Only improve the authored teaching path so the learner is taught before being assessed or asked to code."
   ].join("\n");
 }
 

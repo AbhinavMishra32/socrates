@@ -440,6 +440,55 @@ test("ConstructAgentService creates question and plan jobs and persists the resu
           });
         }
 
+        if (schemaName === "construct_authored_blueprint_lessons") {
+          return schema.parse({
+            steps: [
+              {
+                id: "step.lexer-tokenize",
+                title: "Implement tokenize",
+                summary: "Convert source text into ordered word tokens.",
+                doc: "Edit `src/lexer.ts` at the `TASK:lexer-tokenize` anchor. Implement `tokenize(source)` so it turns whitespace-delimited words into `Token` objects in the same order they appear in the source. The hidden test checks the output shape and preserves source order.",
+                lessonSlides: [
+                  "## Why tokenization is the first real compiler behavior\n\nA compiler cannot reason directly about raw characters forever. The lexer creates the first stable interface for the rest of the pipeline by turning source text into structured tokens. That is why we start here: once tokenization works, the parser can depend on a predictable stream instead of re-reading raw text.\n\n### What matters in this small step\n\nFor this first version, we are intentionally keeping the token model tiny. Every non-empty whitespace-delimited word becomes a token with a `kind` and its original `lexeme`. The important lesson is not the regex itself. The important lesson is that later stages need a deterministic, ordered representation of the program.",
+                  "## The data shape the parser will trust\n\nThink of a token as a small contract between stages.\n\n- `kind` tells later code how to interpret the piece of syntax\n- `lexeme` preserves the original source fragment\n- array order preserves program order\n\nIf the lexer changes the order, drops values incorrectly, or returns a different shape each time, every later stage becomes harder to build. That is why this exercise focuses on producing a stable array of small records rather than on advanced compiler behavior.",
+                  "## A worked mental model for `tokenize`\n\nThe implementation can be understood as a three-part pipeline:\n\n1. split the input on whitespace\n2. remove empty fragments\n3. map each real lexeme into a `Token`\n\n```ts\nconst words = source.split(/\\s+/).filter(Boolean)\nreturn words.map((lexeme) => ({ kind: 'word', lexeme }))\n```\n\nThis sketch is not about cleverness. It is about making the transformation easy to read and easy to trust. Later compiler steps benefit from small, boring, deterministic code here."
+                ],
+                anchor: {
+                  file: "src/lexer.ts",
+                  marker: "TASK:lexer-tokenize",
+                  startLine: null,
+                  endLine: null
+                },
+                tests: ["tests/lexer.test.ts"],
+                concepts: ["tokenization", "array mapping"],
+                constraints: ["Return tokens in source order."],
+                checks: [
+                  {
+                    id: "check.lexer.1",
+                    type: "mcq",
+                    prompt: "Why is preserving token order part of the lexer contract?",
+                    options: [
+                      {
+                        id: "a",
+                        label: "Because later compiler stages consume tokens in sequence.",
+                        rationale: null
+                      },
+                      {
+                        id: "b",
+                        label: "Because order only matters for making tests shorter.",
+                        rationale: null
+                      }
+                    ],
+                    answer: "a"
+                  }
+                ],
+                estimatedMinutes: 12,
+                difficulty: "intro"
+              }
+            ]
+          });
+        }
+
         if (schemaName === "construct_runtime_guide") {
           return schema.parse({
             summary: "The implementation is close, but the current return path still mutates state in-place.",
@@ -846,6 +895,36 @@ test("ConstructAgentService skips broad research for small local goals", async (
           });
         }
 
+        if (schemaName === "construct_authored_blueprint_lessons") {
+          return schema.parse({
+            steps: [
+              {
+                id: "step.todo-class",
+                title: "Implement the todo class",
+                summary: "Create the TodoList class.",
+                doc: "Edit `todo.py` at the `TASK:todo-class` anchor. Define the `TodoList` class in that single module, give it in-memory state for todo items, and implement the constructor and the add/list behavior the hidden test exercises. The hidden test checks that a new instance starts empty and that added items come back in insertion order.",
+                lessonSlides: [
+                  "## Why the class itself is the project\n\nThe user asked for a small Python todo class, so the first lesson should teach the class, not setup work around it. A class gives us a place to store todo items and define the tiny API the rest of the project can call.\n\n### The design goal\n\nWe want one obvious object that owns the list of tasks and exposes a small set of behaviors for adding and reading them back.",
+                  "## What state this class owns\n\nA class is useful when it keeps related data and behavior together.\n\n- the constructor creates the initial empty list\n- one method appends a new todo item\n- one method returns the stored items in order\n\nThis is intentionally small, but it teaches a core design habit: put the data next to the behavior that manages it.",
+                  "## Why insertion order matters\n\nA todo list should feel predictable. If you add `buy milk` and then `ship package`, you expect to see them returned in that same sequence.\n\nThat makes insertion order part of the class contract, not just an implementation detail. The hidden test checks this because the user experience depends on it."
+                ],
+                anchor: {
+                  file: "todo.py",
+                  marker: "TASK:todo-class",
+                  startLine: null,
+                  endLine: null
+                },
+                tests: ["tests/test_todo.py"],
+                concepts: ["python.classes"],
+                constraints: ["Keep the implementation small and local."],
+                checks: [],
+                estimatedMinutes: 10,
+                difficulty: "intro"
+              }
+            ]
+          });
+        }
+
         throw new Error(`Unexpected schema request: ${schemaName}`);
       }
     }
@@ -902,6 +981,7 @@ test("ConstructAgentService skips broad research for small local goals", async (
 test("ConstructAgentService generates lesson-first blueprints without a repair loop", async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "construct-agent-blueprint-repair-"));
   let blueprintCalls = 0;
+  let lessonAuthoringCalls = 0;
 
   const service = new ConstructAgentService(root, {
     now: () => new Date("2026-03-15T00:00:00.000Z"),
@@ -1079,11 +1159,10 @@ test("ConstructAgentService generates lesson-first blueprints without a repair l
                 id: "step.systeminfo-core",
                 title: "Implement the first SystemInfo property",
                 summary: "Teach the class shape, then implement the first real read-only property.",
-                doc: "Edit systeminfo.py to complete the os_name property on SystemInfo. Use the Python standard library to return the operating-system name as a string, and keep the API read-only through @property so the test can call `SystemInfo().os_name` directly.",
+                doc: "Edit systeminfo.py to complete the os_name property on SystemInfo.",
                 lessonSlides: [
-                  "## Why the first step is a real property, not setup\nThe request is for a small Python class, so the lesson should start with the class API itself. `SystemInfo` becomes meaningful as soon as it can answer one real question about the machine in a clean, read-only way.",
-                  "## What `@property` is teaching here\nA property lets a class expose computed information through an attribute-like API. That is useful for system details because the caller can read `SystemInfo().os_name` as data, while the class still performs the underlying standard-library lookup internally.",
-                  "## How the standard library fits the design\n`platform.system()` already knows how to report the operating-system name. Wrapping it inside the property teaches an important design pattern: use the stdlib for real facts, then shape those facts behind a small interface the rest of the project can rely on."
+                  "A small first property on the class.",
+                  "Use platform.system()."
                 ],
                 anchor: {
                   file: "systeminfo.py",
@@ -1098,7 +1177,7 @@ test("ConstructAgentService generates lesson-first blueprints without a repair l
                   {
                     id: "check.systeminfo.1",
                     type: "mcq",
-                    prompt: "Why is `@property` a good fit for `os_name` here?",
+                    prompt: "Why is `@property` a good fit?",
                     options: [
                       {
                         id: "a",
@@ -1125,6 +1204,56 @@ test("ConstructAgentService generates lesson-first blueprints without a repair l
               edges: []
             },
             tags: ["python", "macos"]
+          });
+        }
+
+        if (schemaName === "construct_authored_blueprint_lessons") {
+          lessonAuthoringCalls += 1;
+          return schema.parse({
+            steps: [
+              {
+                id: "step.systeminfo-core",
+                title: "Implement the first SystemInfo property",
+                summary: "Teach the class shape, then implement the first real read-only property.",
+                doc: "Edit `systeminfo.py` at the `TASK:systeminfo-os-name` anchor. Complete the `os_name` property on `SystemInfo` so it returns the operating-system name as a string using the Python standard library. The hidden test checks that the property can be read as `SystemInfo().os_name` and that it returns a string without exposing a write-oriented API.",
+                lessonSlides: [
+                  "## Why the first step is a real property, not setup\n\nThe request is for a small Python class, so the lesson should begin where the class becomes useful: the first real piece of information it can report. `SystemInfo` starts to feel like a genuine artifact the moment it can answer one machine question behind a clean interface.\n\nThat is why we do **not** spend this first step on packaging, environment setup, or CLI wrappers. The learner should touch the real project behavior immediately.",
+                  "## What `@property` teaches in this design\n\nA property lets a class expose computed information through an attribute-like interface.\n\n- callers can read `SystemInfo().os_name` like data\n- the class still performs the lookup internally\n- the public API stays read-only and simple\n\nThat is a good fit for system information because the class is presenting facts about the machine, not asking the caller to perform an action.",
+                  "## How the standard library supports the implementation\n\nPython's `platform` module already knows how to report the operating-system name. The job of this step is not to invent a new lookup mechanism. It is to wrap the standard-library call inside the class so later code can depend on a stable interface.\n\n```python\nimport platform\n\nplatform.system()\n```\n\nThe exercise is teaching an important design habit: use the standard library to get the fact, then place that fact behind the small API your project wants to expose."
+                ],
+                anchor: {
+                  file: "systeminfo.py",
+                  marker: "TASK:systeminfo-os-name",
+                  startLine: null,
+                  endLine: null
+                },
+                tests: ["tests/test_systeminfo.py"],
+                concepts: ["python.classes", "python.stdlib.platform"],
+                constraints: ["Use only the Python standard library.", "Keep the API read-only."],
+                checks: [
+                  {
+                    id: "check.systeminfo.1",
+                    type: "mcq",
+                    prompt: "Why is `@property` a good fit for `os_name` in this design?",
+                    options: [
+                      {
+                        id: "a",
+                        label: "It exposes computed machine data through a read-only attribute-like API.",
+                        rationale: null
+                      },
+                      {
+                        id: "b",
+                        label: "It guarantees the lookup runs only once for the entire class.",
+                        rationale: null
+                      }
+                    ],
+                    answer: "a"
+                  }
+                ],
+                estimatedMinutes: 12,
+                difficulty: "intro"
+              }
+            ]
           });
         }
 
@@ -1155,6 +1284,7 @@ test("ConstructAgentService generates lesson-first blueprints without a repair l
     await waitForJobCompletion(service, planJob.jobId);
 
     assert.equal(blueprintCalls, 1);
+    assert.equal(lessonAuthoringCalls, 1);
 
     const generatedProjectDirectories = await readdir(
       path.join(root, ".construct", "generated-blueprints")
@@ -1173,9 +1303,25 @@ test("ConstructAgentService generates lesson-first blueprints without a repair l
     };
 
     assert.match(generatedBlueprint.steps[0]!.title, /SystemInfo property/i);
-    assert.ok(generatedBlueprint.steps[0]!.lessonSlides.length >= 2);
+    assert.ok(generatedBlueprint.steps[0]!.lessonSlides.length >= 3);
+    assert.match(generatedBlueprint.steps[0]!.lessonSlides[0]!, /^## /m);
+    assert.ok(
+      (generatedBlueprint.steps[0]!.lessonSlides[0]!.match(/^## /gm) ?? []).length >= 1
+    );
+    assert.ok(
+      generatedBlueprint.steps[0]!.lessonSlides.some((slide) => slide.includes("```"))
+    );
+    assert.ok(
+      generatedBlueprint.steps[0]!.lessonSlides.some(
+        (slide) =>
+          slide.includes("Why") ||
+          slide.includes("Example") ||
+          slide.includes("Common mistakes") ||
+          slide.includes("How it")
+      )
+    );
     assert.doesNotMatch(generatedBlueprint.steps[0]!.title, /bootstrap|environment/i);
-    assert.match(generatedBlueprint.steps[0]!.doc, /Edit systeminfo\.py/i);
+    assert.match(generatedBlueprint.steps[0]!.doc, /Edit `?systeminfo\.py`?/i);
   } finally {
     await rm(root, { recursive: true, force: true });
   }
