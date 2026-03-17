@@ -225,6 +225,7 @@ type PlanGraphState = {
   mergedResearch: ResearchDigest | null;
   plan: GeneratedProjectPlan | null;
   blueprintDraft: GeneratedBlueprintBundleDraft | null;
+  checkpointStage: "plan-generated" | "blueprint-drafted" | "lessons-authored" | null;
   activeBlueprintPath: string | null;
 };
 
@@ -380,12 +381,28 @@ const GENERATED_COMPREHENSION_CHECK_DRAFT_SCHEMA = z.discriminatedUnion("type", 
   })
 ]);
 
+const GENERATED_LESSON_SLIDE_BLOCK_DRAFT_SCHEMA = z.discriminatedUnion("type", [
+  z.object({
+    type: z.literal("markdown"),
+    markdown: z.string().min(1)
+  }),
+  z.object({
+    type: z.literal("check"),
+    placement: z.enum(["inline", "end"]).default("inline"),
+    check: GENERATED_COMPREHENSION_CHECK_DRAFT_SCHEMA
+  })
+]);
+
+const GENERATED_LESSON_SLIDE_DRAFT_SCHEMA = z.object({
+  blocks: z.array(GENERATED_LESSON_SLIDE_BLOCK_DRAFT_SCHEMA).min(1)
+});
+
 const GENERATED_BLUEPRINT_STEP_DRAFT_SCHEMA = z.object({
   id: z.string().min(1),
   title: z.string().min(1),
   summary: z.string().min(1),
   doc: z.string().min(1),
-  lessonSlides: z.array(z.string().min(1)).default([]),
+  lessonSlides: z.array(GENERATED_LESSON_SLIDE_DRAFT_SCHEMA).default([]),
   anchor: GENERATED_ANCHOR_DRAFT_SCHEMA,
   tests: z.array(z.string().min(1)).min(1),
   concepts: z.array(z.string().min(1)).min(1),
@@ -413,15 +430,53 @@ const GENERATED_BLUEPRINT_BUNDLE_DRAFT_SCHEMA = z.object({
 const LESSON_AUTHORED_STEP_DRAFT_SCHEMA = z.object({
   summary: z.string().min(1),
   doc: z.string().min(1),
-  lessonSlides: z.array(z.string().min(1)).min(2).max(8),
+  lessonSlides: z.array(GENERATED_LESSON_SLIDE_DRAFT_SCHEMA).min(2).max(8),
   checks: z.array(GENERATED_COMPREHENSION_CHECK_DRAFT_SCHEMA).max(4)
+});
+
+const PLANNING_BUILD_CHECKPOINT_SCHEMA = z.object({
+  sessionId: z.string().min(1),
+  answersSignature: z.string().min(1),
+  updatedAt: z.string().datetime(),
+  stage: z.enum(["plan-generated", "blueprint-drafted", "lessons-authored"]),
+  plan: GeneratedProjectPlanSchema,
+  blueprintDraft: GENERATED_BLUEPRINT_BUNDLE_DRAFT_SCHEMA.nullable()
+}).superRefine((value, context) => {
+  if (value.stage === "plan-generated" && value.blueprintDraft !== null) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["blueprintDraft"],
+      message: "blueprintDraft must be null for plan-generated checkpoints."
+    });
+  }
+
+  if (value.stage !== "plan-generated" && value.blueprintDraft === null) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["blueprintDraft"],
+      message: "blueprintDraft is required once blueprint generation has completed."
+    });
+  }
 });
 
 const GENERATED_DEEP_DIVE_DRAFT_SCHEMA = z.object({
   note: z.string().min(1),
-  lessonSlides: z.array(z.string().min(1)).min(1).max(6),
+  lessonSlides: z.array(GENERATED_LESSON_SLIDE_DRAFT_SCHEMA).min(1).max(6),
   checks: z.array(GENERATED_COMPREHENSION_CHECK_DRAFT_SCHEMA).min(1).max(5),
   constraints: z.array(z.string().min(1)).max(4).default([])
+});
+
+const EXPLICIT_GOAL_SELF_REPORT_DRAFT_SCHEMA = z.object({
+  signals: z.array(
+    z.object({
+      conceptId: z.string().min(1),
+      label: z.string().min(1),
+      category: z.enum(["language", "domain", "workflow"]),
+      score: z.number().int().min(0).max(100),
+      rationale: z.string().min(1),
+      labelPath: z.array(z.string().min(1)).min(1).max(8).optional()
+    })
+  ).max(8).default([])
 });
 
 const SHORT_ANSWER_CHECK_REVIEW_DRAFT_SCHEMA = z.object({
@@ -433,6 +488,7 @@ const SHORT_ANSWER_CHECK_REVIEW_DRAFT_SCHEMA = z.object({
 
 type GeneratedBlueprintBundleDraft = z.infer<typeof GENERATED_BLUEPRINT_BUNDLE_DRAFT_SCHEMA>;
 type GeneratedBlueprintStepDraft = z.infer<typeof GENERATED_BLUEPRINT_STEP_DRAFT_SCHEMA>;
+type PlanningBuildCheckpoint = z.infer<typeof PLANNING_BUILD_CHECKPOINT_SCHEMA>;
 
 export class ConstructAgentService {
   private readonly rootDirectory: string;
@@ -1166,6 +1222,15 @@ export class ConstructAgentService {
           return this.readKnowledgeBase();
         })
       }))
+      .addNode("extractGoalSelfReport", async (state) => ({
+        knowledgeBase: await this.withStage(jobId, "goal-self-report", "Reading learner self-description", "The Architect is extracting any explicit self-reported skill signals directly from the project prompt before it writes intake questions.", async () => {
+          return this.extractGoalSelfReportKnowledge(
+            state.knowledgeBase,
+            state.request.goal,
+            state.request.learningStyle
+          );
+        })
+      }))
       .addNode("determineScope", async (state) => ({
         goalScope: await this.withStage(jobId, "scope-analysis", "Scoping the request", "The Architect is deciding how large the project should be and whether broad external research is justified.", async () => {
           return this.determineGoalScope(state.request.goal, state.request.learningStyle);
@@ -1240,7 +1305,8 @@ export class ConstructAgentService {
         })
       }))
       .addEdge(START, "loadKnowledgeBase")
-      .addEdge("loadKnowledgeBase", "determineScope")
+      .addEdge("loadKnowledgeBase", "extractGoalSelfReport")
+      .addEdge("extractGoalSelfReport", "determineScope")
       .addEdge("determineScope", "researchProjectShape")
       .addEdge("determineScope", "researchPrerequisites")
       .addEdge("researchProjectShape", "mergeResearch")
@@ -1282,6 +1348,11 @@ export class ConstructAgentService {
 
     const session = planningState.session;
     const resolvedAnswers = this.resolvePlanningAnswers(session, request.answers);
+    const answersSignature = this.buildPlanningAnswersSignature(resolvedAnswers);
+    const planningCheckpoint = await this.readPlanningBuildCheckpoint(
+      request.sessionId,
+      answersSignature
+    );
 
     const StateAnnotation = Annotation.Root({
       jobId: Annotation<string>(),
@@ -1295,6 +1366,7 @@ export class ConstructAgentService {
       mergedResearch: Annotation<ResearchDigest | null>(),
       plan: Annotation<GeneratedProjectPlan | null>(),
       blueprintDraft: Annotation<GeneratedBlueprintBundleDraft | null>(),
+      checkpointStage: Annotation<PlanGraphState["checkpointStage"]>(),
       activeBlueprintPath: Annotation<string | null>()
     });
 
@@ -1364,7 +1436,17 @@ export class ConstructAgentService {
         })
       }))
       .addNode("generatePlan", async (state) => ({
-        plan: await this.withStage(jobId, "plan-generation", "Synthesizing the personalized roadmap", "OpenAI is merging the project dependencies, learner profile, and research into a detailed build path.", async () => {
+        plan: state.plan
+          ? await (async () => {
+              await this.resumePlanningCheckpointStage(
+                jobId,
+                "plan-generation",
+                "Reusing the saved roadmap draft",
+                "Construct is resuming from the last successful planning stage instead of generating the roadmap again."
+              );
+              return state.plan;
+            })()
+          : await this.withStage(jobId, "plan-generation", "Synthesizing the personalized roadmap", "OpenAI is merging the project dependencies, learner profile, and research into a detailed build path.", async () => {
           const stream = this.createModelStreamForwarder(jobId, "plan-generation", "plan generation");
           try {
             const planDraft = await this.getLlm().parse({
@@ -1399,15 +1481,33 @@ export class ConstructAgentService {
               plan,
               resolvedAnswers
             );
+            await this.writePlanningBuildCheckpoint(state.session.sessionId, {
+              answersSignature,
+              stage: "plan-generated",
+              plan,
+              blueprintDraft: null
+            });
 
             return plan;
           } finally {
             stream.onComplete?.();
           }
-        })
+        }),
+        checkpointStage: state.plan ? (state.checkpointStage ?? "plan-generated") : "plan-generated"
       }))
       .addNode("generateBlueprint", async (state) => ({
-        blueprintDraft: await this.withStage(jobId, "blueprint-generation", "Generating the runnable project blueprint", "Construct is generating the canonical project, masked learner files, and hidden tests for the personalized path.", async () => {
+        blueprintDraft: state.blueprintDraft &&
+          (state.checkpointStage === "blueprint-drafted" || state.checkpointStage === "lessons-authored")
+          ? await (async () => {
+              await this.resumePlanningCheckpointStage(
+                jobId,
+                "blueprint-generation",
+                "Reusing the saved project bundle draft",
+                "Construct is resuming from the last successful project-bundle stage instead of drafting the bundle again."
+              );
+              return state.blueprintDraft;
+            })()
+          : await this.withStage(jobId, "blueprint-generation", "Generating the runnable project blueprint", "Construct is generating the canonical project, masked learner files, and hidden tests for the personalized path.", async () => {
           if (!state.plan) {
             throw new Error("Cannot generate a blueprint before the project plan exists.");
           }
@@ -1491,12 +1591,33 @@ export class ConstructAgentService {
             hiddenTestCount: bundleDraft.hiddenTests.length,
             stepCount: bundleDraft.steps.length
           });
+          await this.writePlanningBuildCheckpoint(state.session.sessionId, {
+            answersSignature,
+            stage: "blueprint-drafted",
+            plan: state.plan,
+            blueprintDraft: bundleDraft
+          });
 
           return bundleDraft;
-        })
+        }),
+        checkpointStage:
+          state.blueprintDraft &&
+          (state.checkpointStage === "blueprint-drafted" || state.checkpointStage === "lessons-authored")
+            ? state.checkpointStage
+            : "blueprint-drafted"
       }))
       .addNode("authorLessons", async (state) => ({
-        blueprintDraft: await this.withStage(jobId, "lesson-authoring", "Writing the lesson chapters", "The Architect is turning each step into a docs-style lesson with substantial markdown explanations, grounded checks, and a clear implementation handoff.", async () => {
+        blueprintDraft: state.blueprintDraft && state.checkpointStage === "lessons-authored"
+          ? await (async () => {
+              await this.resumePlanningCheckpointStage(
+                jobId,
+                "lesson-authoring",
+                "Reusing the saved lesson chapters",
+                "Construct is resuming from the last successful lesson-authoring stage instead of rewriting the chapters again."
+              );
+              return state.blueprintDraft;
+            })()
+          : await this.withStage(jobId, "lesson-authoring", "Writing the lesson chapters", "The Architect is turning each step into a docs-style lesson with substantial markdown explanations, grounded checks, and a clear implementation handoff.", async () => {
           if (!state.plan) {
             throw new Error("Cannot author lessons before the project plan exists.");
           }
@@ -1617,9 +1738,19 @@ export class ConstructAgentService {
             firstStepSlideCount: nextBlueprintDraft.steps[0]?.lessonSlides.length ?? 0,
             firstStepCheckCount: nextBlueprintDraft.steps[0]?.checks.length ?? 0
           });
+          await this.writePlanningBuildCheckpoint(state.session.sessionId, {
+            answersSignature,
+            stage: "lessons-authored",
+            plan: state.plan,
+            blueprintDraft: nextBlueprintDraft
+          });
 
           return nextBlueprintDraft;
-        })
+        }),
+        checkpointStage:
+          state.blueprintDraft && state.checkpointStage === "lessons-authored"
+            ? state.checkpointStage
+            : "lessons-authored"
       }))
       .addNode("persistBlueprint", async (state) => ({
         activeBlueprintPath: await this.withStage(jobId, "blueprint-materialization", "Materializing the generated project", "Construct is writing the authored lessons, canonical project, learner workspace, and hidden tests into the active project.", async () => {
@@ -1627,16 +1758,19 @@ export class ConstructAgentService {
             throw new Error("Cannot persist a blueprint before the project plan exists.");
           }
 
-          if (!state.blueprintDraft) {
-            throw new Error("Cannot persist a blueprint before the lesson-authored draft exists.");
-          }
+          const resolvedBlueprintDraft = this.resolvePersistablePlanningBlueprintDraft(
+            state.blueprintDraft,
+            planningCheckpoint?.blueprintDraft ?? null
+          );
 
-          return this.persistGeneratedBlueprint(
+          const activeBlueprintPath = await this.persistGeneratedBlueprint(
             jobId,
             state.session,
             state.plan,
-            state.blueprintDraft
+            resolvedBlueprintDraft
           );
+          await this.persistence.clearPlanningBuildCheckpoint(state.session.sessionId);
+          return activeBlueprintPath;
         })
       }))
       .addEdge(START, "loadKnowledgeBase")
@@ -1664,8 +1798,9 @@ export class ConstructAgentService {
       dependencyResearch: null,
       validationResearch: null,
       mergedResearch: null,
-      plan: null,
-      blueprintDraft: null,
+      plan: planningCheckpoint?.plan ?? null,
+      blueprintDraft: planningCheckpoint?.blueprintDraft ?? null,
+      checkpointStage: planningCheckpoint?.stage ?? null,
       activeBlueprintPath: null
     });
 
@@ -1832,7 +1967,7 @@ export class ConstructAgentService {
               const updatedStep = BlueprintStepSchema.parse({
                 ...currentStep,
                 lessonSlides: [
-                  ...deepDiveDraft.lessonSlides,
+                  ...normalizeGeneratedLessonSlides(deepDiveDraft.lessonSlides, deepDiveDraft.note),
                   ...getExistingLessonSlides(currentStep)
                 ],
                 checks: [
@@ -2243,6 +2378,116 @@ export class ConstructAgentService {
     });
   }
 
+  private buildPlanningAnswersSignature(answers: ResolvedPlanningAnswer[]): string {
+    return JSON.stringify(
+      answers.map((answer) => ({
+        questionId: answer.questionId,
+        conceptId: answer.conceptId,
+        category: answer.category,
+        answerType: answer.answerType,
+        selectedOptionId: answer.selectedOption?.id ?? null,
+        selectedConfidenceSignal: answer.selectedOption?.confidenceSignal ?? null,
+        customResponse: answer.customResponse?.trim() ?? null
+      }))
+    );
+  }
+
+  private async readPlanningBuildCheckpoint(
+    sessionId: string,
+    answersSignature: string
+  ): Promise<PlanningBuildCheckpoint | null> {
+    const rawCheckpoint = await this.persistence.getPlanningBuildCheckpoint(sessionId);
+
+    if (!rawCheckpoint) {
+      return null;
+    }
+
+    const parsed = PLANNING_BUILD_CHECKPOINT_SCHEMA.safeParse(rawCheckpoint);
+
+    if (!parsed.success) {
+      this.logger.warn("Planning build checkpoint was invalid. Clearing it before retry.", {
+        sessionId,
+        issueCount: parsed.error.issues.length
+      });
+      await this.persistence.clearPlanningBuildCheckpoint(sessionId);
+      return null;
+    }
+
+    if (parsed.data.answersSignature !== answersSignature) {
+      this.logger.info("Planning build checkpoint does not match the latest answers. Ignoring it.", {
+        sessionId,
+        checkpointStage: parsed.data.stage
+      });
+      return null;
+    }
+
+    return parsed.data;
+  }
+
+  private async writePlanningBuildCheckpoint(
+    sessionId: string,
+    input: {
+      answersSignature: string;
+      stage: PlanningBuildCheckpoint["stage"];
+      plan: GeneratedProjectPlan;
+      blueprintDraft: GeneratedBlueprintBundleDraft | null;
+    }
+  ): Promise<void> {
+    await this.persistence.setPlanningBuildCheckpoint(
+      sessionId,
+      PLANNING_BUILD_CHECKPOINT_SCHEMA.parse({
+        sessionId,
+        answersSignature: input.answersSignature,
+        updatedAt: this.now().toISOString(),
+        stage: input.stage,
+        plan: input.plan,
+        blueprintDraft: input.blueprintDraft
+      })
+    );
+  }
+
+  private async resumePlanningCheckpointStage(
+    jobId: string,
+    stage: string,
+    title: string,
+    detail: string
+  ): Promise<void> {
+    const job = this.jobs.get(jobId);
+
+    if (!job) {
+      return;
+    }
+
+    this.emitEvent(job, {
+      stage,
+      title,
+      detail,
+      level: "success"
+    });
+  }
+
+  private resolvePersistablePlanningBlueprintDraft(
+    draft: GeneratedBlueprintBundleDraft | null,
+    fallbackDraft: GeneratedBlueprintBundleDraft | null
+  ): GeneratedBlueprintBundleDraft {
+    const direct = GENERATED_BLUEPRINT_BUNDLE_DRAFT_SCHEMA.safeParse(draft);
+
+    if (direct.success) {
+      return normalizeGeneratedBlueprintDraft(direct.data);
+    }
+
+    const fallback = GENERATED_BLUEPRINT_BUNDLE_DRAFT_SCHEMA.safeParse(fallbackDraft);
+
+    if (fallback.success) {
+      this.logger.warn("Planning graph draft was incomplete during persistence. Falling back to the saved checkpoint draft.", {
+        directIssueCount: direct.success ? 0 : direct.error.issues.length
+      });
+      return normalizeGeneratedBlueprintDraft(fallback.data);
+    }
+
+    throw new Error("Cannot persist a blueprint before the lesson-authored draft exists.");
+  }
+
   private async persistGeneratedBlueprint(
     jobId: string,
     session: PlanningSession,
@@ -2464,7 +2709,79 @@ export class ConstructAgentService {
   }
 
   private async readKnowledgeBase(): Promise<UserKnowledgeBase> {
-    return (await this.persistence.getKnowledgeBase()) ?? createEmptyKnowledgeBase(this.now().toISOString());
+    try {
+      return (
+        (await this.persistence.getKnowledgeBase()) ??
+        createEmptyKnowledgeBase(this.now().toISOString())
+      );
+    } catch (error) {
+      this.logger.warn("Knowledge base read failed. Resetting to empty recursive graph.", {
+        error: error instanceof Error ? error.message : String(error)
+      });
+
+      const reset = createEmptyKnowledgeBase(this.now().toISOString());
+
+      try {
+        await this.persistence.setKnowledgeBase(reset);
+      } catch (persistError) {
+        this.logger.warn("Knowledge base reset could not be persisted.", {
+          error: persistError instanceof Error ? persistError.message : String(persistError)
+        });
+      }
+
+      return reset;
+    }
+  }
+
+  private async extractGoalSelfReportKnowledge(
+    current: UserKnowledgeBase,
+    goal: string,
+    learningStyle: LearningStyle
+  ): Promise<UserKnowledgeBase> {
+    const timestamp = this.now().toISOString();
+    const draft = await this.getLlm().parse({
+      schema: EXPLICIT_GOAL_SELF_REPORT_DRAFT_SCHEMA,
+      schemaName: "construct_goal_self_report_signals",
+      instructions: buildGoalSelfReportExtractionInstructions(),
+      prompt: JSON.stringify(
+        {
+          goal,
+          learningStyle,
+          priorKnowledge: serializeKnowledgeBaseForPrompt(current)
+        },
+        null,
+        2
+      ),
+      maxOutputTokens: 1_400,
+      verbosity: "low"
+    });
+
+    if (draft.signals.length === 0) {
+      return current;
+    }
+
+    const nextKnowledgeBase = applyKnowledgeSignals(
+      current,
+      draft.signals.map((signal) => ({
+        conceptId: signal.conceptId,
+        label: signal.label,
+        category: signal.category,
+        score: signal.score,
+        rationale: signal.rationale,
+        source: "self-report" as const,
+        recordedAt: timestamp,
+        labelPath: signal.labelPath
+      }))
+    );
+
+    await this.persistence.setKnowledgeBase(nextKnowledgeBase);
+    this.logger.info("Merged explicit self-report signals from project goal.", {
+      goal,
+      signalCount: draft.signals.length,
+      conceptCount: countKnowledgeConceptNodes(nextKnowledgeBase.concepts)
+    });
+
+    return nextKnowledgeBase;
   }
 
   private async mergeKnowledgeBase(
@@ -2863,8 +3180,80 @@ export class OpenAIStructuredLanguageModel implements StructuredLanguageModel {
       schemaName: input.schemaName,
       content: text
     });
-    const jsonPayload = JSON.parse(extractJsonObject(text));
-    return input.schema.parse(jsonPayload);
+
+    try {
+      const jsonPayload = JSON.parse(extractJsonObject(text));
+      return input.schema.parse(jsonPayload);
+    } catch (error) {
+      this.logger.warn("JSON fallback returned invalid JSON. Attempting repair.", {
+        model: this.model,
+        schemaName: input.schemaName,
+        error: toError(error).message
+      });
+      return this.repairJsonFallbackResponse(input, schemaContract, text);
+    }
+  }
+
+  private async repairJsonFallbackResponse<T extends z.ZodTypeAny>(
+    input: {
+      schema: T;
+      schemaName: string;
+      instructions: string;
+      prompt: string;
+      maxOutputTokens?: number;
+      verbosity?: "low" | "medium" | "high";
+      stream?: {
+        stage: string;
+        label: string;
+        onToken?: (chunk: string) => void;
+        onComplete?: () => void;
+      };
+    },
+    schemaContract: unknown,
+    invalidText: string
+  ): Promise<z.infer<T>> {
+    const response = await this.client.invoke([
+      [
+        "system",
+        [
+          "You repair malformed model JSON outputs.",
+          "Return only a valid JSON object with no markdown fences or commentary.",
+          "Preserve the intended meaning of the draft, but make it syntactically valid and schema-compatible.",
+          "Convert informal numeric words such as `fifty` into numbers when the schema requires numbers.",
+          "The repaired JSON must satisfy this schema contract:",
+          JSON.stringify(schemaContract, null, 2)
+        ].join("\n\n")
+      ],
+      [
+        "user",
+        [
+          "Original instructions:",
+          input.instructions,
+          "",
+          "Original prompt:",
+          input.prompt,
+          "",
+          "Malformed JSON draft:",
+          invalidText
+        ].join("\n")
+      ]
+    ], {
+      runName: `${input.schemaName}:json-repair`,
+      tags: ["construct", "json-repair", input.schemaName],
+      metadata: {
+        schemaName: input.schemaName,
+        mode: "json-repair"
+      }
+    });
+
+    const repairedText = extractModelText(response.content);
+    this.logger.trace?.("OpenAI JSON repair response trace.", {
+      model: this.model,
+      schemaName: input.schemaName,
+      content: repairedText
+    });
+    const repairedPayload = JSON.parse(extractJsonObject(repairedText));
+    return input.schema.parse(repairedPayload);
   }
 
   private buildStreamingCallbacks(input: {
@@ -3591,48 +3980,94 @@ function truncateText(value: string, maxLength: number): string {
 }
 
 function normalizeDraftLessonSlides(
-  lessonSlides: string[],
+  lessonSlides: Array<z.infer<typeof GENERATED_LESSON_SLIDE_DRAFT_SCHEMA>>,
   fallbackDoc: string
-): string[] {
-  const rawSlides = lessonSlides.length > 0 ? lessonSlides : [fallbackDoc];
-  const normalizedSlides: string[] = [];
+): Array<z.infer<typeof GENERATED_LESSON_SLIDE_DRAFT_SCHEMA>> {
+  const fallbackSlide = {
+    blocks: [
+      {
+        type: "markdown" as const,
+        markdown: fallbackDoc.trim()
+      }
+    ]
+  };
+  const rawSlides = lessonSlides.length > 0 ? lessonSlides : [fallbackSlide];
+  const normalizedSlides: Array<z.infer<typeof GENERATED_LESSON_SLIDE_DRAFT_SCHEMA>> = [];
 
-  for (const rawSlide of rawSlides) {
-    const prepared = rawSlide.replaceAll("\\n", "\n").trim();
-    if (!prepared) {
-      continue;
-    }
+  for (const slide of rawSlides) {
+    const normalizedBlocks: Array<z.infer<typeof GENERATED_LESSON_SLIDE_BLOCK_DRAFT_SCHEMA>> = [];
 
-    const multiSlideMatches = Array.from(
-      prepared.matchAll(/(?:^|\n)\s*(?:[-*]\s*)?slide\s+\d+\s*:\s*/gi)
-    );
+    for (const block of slide.blocks) {
+      if (block.type === "check") {
+        normalizedBlocks.push({
+          type: "check",
+          placement: block.placement ?? "inline",
+          check: block.check
+        });
+        continue;
+      }
 
-    if (multiSlideMatches.length >= 2) {
-      const fragments = prepared
-        .split(/(?:^|\n)\s*(?:[-*]\s*)?slide\s+\d+\s*:\s*/gi)
+      const prepared = block.markdown.replaceAll("\\n", "\n").trim();
+      if (!prepared) {
+        continue;
+      }
+
+      const multiSlideMatches = Array.from(
+        prepared.matchAll(/(?:^|\n)\s*(?:[-*]\s*)?slide\s+\d+\s*:\s*/gi)
+      );
+
+      if (multiSlideMatches.length >= 2 && normalizedBlocks.length === 0) {
+        const fragments = prepared
+          .split(/(?:^|\n)\s*(?:[-*]\s*)?slide\s+\d+\s*:\s*/gi)
+          .map((fragment) => fragment.trim())
+          .filter(Boolean);
+
+        for (const fragment of fragments) {
+          normalizedSlides.push({
+            blocks: [
+              {
+                type: "markdown",
+                markdown: fragment
+              }
+            ]
+          });
+        }
+        continue;
+      }
+
+      const markdownDividerFragments = prepared
+        .split(/\n\s*---+\s*\n/g)
         .map((fragment) => fragment.trim())
         .filter(Boolean);
 
-      for (const fragment of fragments) {
-        normalizedSlides.push(fragment);
+      if (markdownDividerFragments.length >= 2 && normalizedBlocks.length === 0) {
+        normalizedSlides.push(
+          ...markdownDividerFragments.map((fragment) => ({
+            blocks: [
+              {
+                type: "markdown" as const,
+                markdown: fragment
+              }
+            ]
+          }))
+        );
+        continue;
       }
-      continue;
+
+      normalizedBlocks.push({
+        type: "markdown",
+        markdown: prepared
+      });
     }
 
-    const markdownDividerFragments = prepared
-      .split(/\n\s*---+\s*\n/g)
-      .map((fragment) => fragment.trim())
-      .filter(Boolean);
-
-    if (markdownDividerFragments.length >= 2) {
-      normalizedSlides.push(...markdownDividerFragments);
-      continue;
+    if (normalizedBlocks.length > 0) {
+      normalizedSlides.push({
+        blocks: normalizedBlocks
+      });
     }
-
-    normalizedSlides.push(prepared);
   }
 
-  return normalizedSlides.length > 0 ? normalizedSlides : [fallbackDoc.trim()];
+  return normalizedSlides.length > 0 ? normalizedSlides : [fallbackSlide];
 }
 
 function normalizeGeneratedBlueprintDraft(
@@ -3666,7 +4101,7 @@ function normalizeGeneratedBlueprintSteps(
   return steps.map((step) =>
     BlueprintStepSchema.parse({
       ...step,
-      lessonSlides: normalizeDraftLessonSlides(step.lessonSlides, step.doc),
+      lessonSlides: normalizeGeneratedLessonSlides(step.lessonSlides, step.doc),
       anchor: {
         file: step.anchor.file,
         marker: step.anchor.marker,
@@ -3676,6 +4111,25 @@ function normalizeGeneratedBlueprintSteps(
       checks: normalizeGeneratedChecks(step.checks)
     })
   );
+}
+
+function normalizeGeneratedLessonSlides(
+  lessonSlides: GeneratedBlueprintStepDraft["lessonSlides"],
+  fallbackDoc: string
+): ProjectBlueprint["steps"][number]["lessonSlides"] {
+  return normalizeDraftLessonSlides(lessonSlides, fallbackDoc).map((slide) => ({
+    blocks: slide.blocks.map((block) => {
+      if (block.type === "markdown") {
+        return block;
+      }
+
+      return {
+        type: "check" as const,
+        placement: block.placement,
+        check: normalizeGeneratedChecks([block.check])[0] as ComprehensionCheck
+      };
+    })
+  }));
 }
 
 function buildLessonAuthoringBrief(
@@ -3708,7 +4162,8 @@ function buildLessonAuthoringBrief(
     "How the concept behaves in code or data",
     "A worked example or conceptual code sketch",
     "Common mistakes or edge cases",
-    "How the explanation connects directly to the exercise"
+    "How the explanation connects directly to the exercise",
+    "How this concept leads into the next concept or implementation boundary in the project"
   ];
 
   return {
@@ -3773,8 +4228,19 @@ function replaceBlueprintStep(
 
 function getExistingLessonSlides(
   step: ProjectBlueprint["steps"][number]
-): string[] {
-  return step.lessonSlides.length > 0 ? step.lessonSlides : [step.doc];
+): ProjectBlueprint["steps"][number]["lessonSlides"] {
+  return step.lessonSlides.length > 0
+    ? step.lessonSlides
+    : [
+        {
+          blocks: [
+            {
+              type: "markdown",
+              markdown: step.doc
+            }
+          ]
+        }
+      ];
 }
 
 function slugify(value: string): string {
@@ -3900,6 +4366,25 @@ function buildQuestionGenerationInstructions(): string {
   ].join("\n");
 }
 
+function buildGoalSelfReportExtractionInstructions(): string {
+  return [
+    "You are Construct's Architect agent.",
+    "Extract only explicit learner self-report signals from the raw project prompt.",
+    "This is not a general project analysis pass. Do not infer skill from the requested project alone.",
+    "Only capture knowledge signals the learner directly stated or strongly implied about themselves, such as being new to Rust, being comfortable with DFA/NFA, wanting more syntax hand-holding, or preferring larger problem-solving over small drills.",
+    "If the prompt contains no explicit learner self-report, return an empty signals array.",
+    "Each signal must target the most relevant concept or subtopic path possible, using dot-separated conceptId values such as rust, rust.ownership, compilers.lexing.dfa, or workflow.hand_holding.",
+    "Use nested subtopics when the user statement is specific enough. Do not flatten everything to the top-level topic.",
+    "label should be the human-readable concept name for the leaf node.",
+    "labelPath should include the human-readable labels from the top-level concept to the leaf concept when you can determine them cleanly.",
+    "score is a 0-100 mastery estimate based only on the learner's self-report.",
+    "Low scores should be used for statements like 'very new', 'beginner', or 'never used'. High scores should be used only for explicit comfort or repeated experience.",
+    "category must be one of language, domain, or workflow.",
+    "rationale should quote or precisely summarize the self-report evidence from the prompt.",
+    "Never create signals for project requirements, tooling names, or concepts the learner did not describe about themselves."
+  ].join("\n");
+}
+
 function buildPlanGenerationInstructions(): string {
   return [
     "You are Construct's Architect agent.",
@@ -3936,7 +4421,10 @@ function buildBlueprintGenerationInstructions(): string {
     "hiddenTests must validate the learner tasks and stay runnable without exposing full solutions in the learnerFiles.",
     "The answers payload includes the original question, the available options, and either a selected option or a custom freeform learner response. Use that context to tune scope, docs, checks, and task ordering.",
     "Every step must point to a real learnerFile anchor and include lessonSlides, doc text, comprehension checks, constraints, and targeted tests.",
-    "lessonSlides are the main teaching surface. Write them like a real course lesson in markdown, not like a checklist of instructions.",
+    "lessonSlides are the main teaching surface. Each slide must be an object with a blocks array.",
+    "A markdown block looks like { type: 'markdown', markdown: '...' }.",
+    "An inline question block looks like { type: 'check', placement: 'inline' | 'end', check: <same comprehension check shape> }.",
+    "Use inline check blocks only when the learner would benefit from answering a question inside the lesson itself before moving on. Inline checks add to the teaching flow; they do not replace the normal checks array.",
     "Teach the required concept from the learner's current level so they can actually solve the task afterward. Use rich markdown prose, bullet lists, ordered lists, blockquotes, horizontal rules, tables when useful, and fenced code snippets when helpful.",
     "lessonSlides should teach the concept in markdown before the task begins. Emit each slide as its own array entry. Do not collapse multiple slides into one string.",
     "Each slide should usually teach one primary concept or one tightly related concept cluster. The next slide should move to the next concept the learner needs for the project.",
@@ -3965,6 +4453,11 @@ function buildBlueprintGenerationInstructions(): string {
     "Checks should confirm understanding of the explanation, not assess unrelated recall. If a check could feel like an interview question or trivia question, rewrite either the lesson or the check.",
     "The first step should usually have only 1-2 checks, and they should directly follow from the lesson content. Prefer fewer, better-grounded checks over many shallow ones.",
     "If the learner is being taught a new capability, the slides should normally cover: what the concept is, why it matters in this project, a worked example, common mistakes, and how it maps to the upcoming exercise.",
+    "Do not teach generic language fundamentals in the abstract. Tie every explanation back to the exact requested project and the current implementation boundary.",
+    "If the project is something like a Rust SWC-style compiler pipeline, teach Rust concepts only insofar as they matter for parser data structures, ownership in ASTs, transformations, code generation, or interop for that exact project.",
+    "Every slide should make the project connection obvious. A learner should be able to answer 'why am I learning this for this project right now?' after reading any slide.",
+    "The slides inside a step should have smooth continuity. Each slide should clearly set up the next concept the learner needs, rather than feeling like random disconnected notes.",
+    "The exercise handoff should feel like the natural next move after the lesson, not a disconnected coding task.",
     "For small or local requests, stay tightly scoped. Do not invent setup-heavy preliminaries, validation harness units, optional export features, platform checks, or packaging tasks before the first meaningful implementation step unless the user explicitly asked for them.",
     "doc should describe the exercise or implementation task itself, not repeat the whole concept lesson. It must clearly say what code the learner will change, what behavior the tests will verify, and how the task connects to the just-taught concept.",
     "The exercise should be solvable from the lessonSlides and checks that come before it. The quiz must be grounded in the lessonSlides, not random setup trivia or command memorization.",
@@ -3993,7 +4486,10 @@ function buildLessonAuthoringInstructions(context: {
     "The answers payload includes the original question, the available options, and either a selected option or a custom freeform learner response. Use that context to decide how much to explain, what examples to choose, and where to slow down.",
     "Rewrite lessonSlides, doc, and checks so they match the learner's level and the real code task.",
     "lessonSlides must be rich markdown and should read like documentation or a high-quality course chapter.",
-    "Each slide should be its own markdown document. Do not collapse multiple slides into one string.",
+    "Each slide must be an object with a blocks array.",
+    "A markdown block looks like { type: 'markdown', markdown: '...' }.",
+    "An inline question block looks like { type: 'check', placement: 'inline' | 'end', check: <same comprehension check shape> }.",
+    "Use inline question blocks only when the learner would benefit from checking understanding inside the lesson before moving forward. Inline checks should feel embedded in the explanation, not like a separate quiz screen pasted into the slide.",
     "Treat each slide as a docs page section for one concept the learner must understand before implementing the task.",
     "Use markdown structure deliberately: headings, paragraphs, bullet lists, ordered lists, blockquotes, tables when helpful, and fenced code blocks for worked examples or conceptual sketches.",
     "Do not repeat the step title as the main heading of every slide. The UI already shows step context.",
@@ -4002,6 +4498,7 @@ function buildLessonAuthoringInstructions(context: {
     "A good slide usually explains the mental model, why it matters in this project, the important API or language behavior, common mistakes, and how that idea shows up in the upcoming implementation.",
     "Within a step, different slides should usually cover different required concepts. Do not use consecutive slides to repeat the same short summary.",
     "Different slides should progress the learner from one required concept to the next. Think 'next concept page' rather than 'next decorative slide'.",
+    "Make the continuity obvious. Every slide should connect back to the previous concept and forward to the next one the learner needs for this exact project.",
     "When a step introduces a new concept, write enough for a learner to understand it without having to infer missing background.",
     "For most real implementation steps, each slide should contain multiple paragraphs and at least one supporting structure such as a list, comparison, callout, or fenced code example.",
     "Most slides should also contain at least two markdown section headings such as `## Why this matters`, `## How it works`, `## Example`, `## Common mistakes`, `## Step-by-step reasoning`, or `## How this maps to the exercise`.",
@@ -4024,6 +4521,8 @@ function buildLessonAuthoringInstructions(context: {
     "Do not move to checks after a single summary slide unless the concept is truly trivial. In most real steps, the learner should read multiple substantial docs-style slides before the first check.",
     "The learner should finish a slide feeling taught, not merely informed. Write with the intent of making them capable of succeeding in the exercise immediately afterward.",
     "Make the chapter feel hand-holding. Remove hidden leaps in understanding and connect each explanation explicitly to the code they will write next.",
+    "Do not teach generic fundamentals detached from the requested project. If you teach a language feature, immediately tie it to how it will be used in this step's implementation.",
+    "The doc field must be a clean exercise handoff: after reading the slides, the learner should understand exactly why the task exists, what concept they are about to apply, what file they will edit, and what behavior the tests will verify.",
     "If the current draft already contains useful material, expand and refine it instead of discarding the implementation intent.",
     "Do not alter the code files or hidden tests. Only improve the authored teaching path so the learner is taught before being assessed or asked to code."
   ].join("\n");

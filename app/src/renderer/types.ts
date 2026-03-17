@@ -206,12 +206,26 @@ export type CheckReviewResponse = {
   review: CheckReview;
 };
 
+export type LessonSlideBlock =
+  | {
+      type: "markdown";
+      markdown: string;
+    }
+  | {
+      type: "check";
+      check: ComprehensionCheck;
+    };
+
+export type LessonSlide = {
+  blocks: LessonSlideBlock[];
+};
+
 export type BlueprintStep = {
   id: string;
   title: string;
   summary: string;
   doc: string;
-  lessonSlides: string[];
+  lessonSlides: Array<string | LessonSlide>;
   anchor: {
     file: string;
     marker: string;

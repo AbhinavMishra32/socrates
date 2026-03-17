@@ -248,3 +248,42 @@ test("local agent persistence resets an invalid knowledge base to the new recurs
     await rm(root, { recursive: true, force: true });
   }
 });
+
+test("local agent persistence resets a malformed knowledge base payload", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "construct-agent-persistence-malformed-kb-"));
+  const previousBackend = process.env.CONSTRUCT_STORAGE_BACKEND;
+  delete process.env.DATABASE_URL;
+  process.env.CONSTRUCT_STORAGE_BACKEND = "local";
+
+  const persistence = createAgentPersistence({
+    rootDirectory: root,
+    logger: {
+      info() {},
+      warn() {},
+      error() {}
+    }
+  });
+
+  try {
+    const stateDirectory = path.join(root, ".construct", "state");
+    const knowledgeBasePath = path.join(stateDirectory, "user-knowledge.json");
+    await mkdir(stateDirectory, { recursive: true });
+    await writeFile(knowledgeBasePath, "{ not-valid-json", "utf8");
+
+    const knowledgeBase = await persistence.getKnowledgeBase();
+    const persistedRaw = JSON.parse(await readFile(knowledgeBasePath, "utf8"));
+
+    assert.deepEqual(knowledgeBase?.concepts, []);
+    assert.deepEqual(knowledgeBase?.goals, []);
+    assert.deepEqual(persistedRaw.concepts, []);
+    assert.deepEqual(persistedRaw.goals, []);
+  } finally {
+    if (previousBackend) {
+      process.env.CONSTRUCT_STORAGE_BACKEND = previousBackend;
+    } else {
+      delete process.env.CONSTRUCT_STORAGE_BACKEND;
+    }
+
+    await rm(root, { recursive: true, force: true });
+  }
+});

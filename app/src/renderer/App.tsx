@@ -46,6 +46,7 @@ import type {
   CheckReview,
   ComprehensionCheck,
   GeneratedProjectPlan,
+  LessonSlide,
   LearningStyle,
   LearnerProfileResponse,
   LearnerModel,
@@ -3058,8 +3059,7 @@ function BriefOverlay({
   deepDiveBusy: boolean;
   deepDiveError: string;
 }) {
-  const lessonSlides =
-    activeStep.lessonSlides.length > 0 ? activeStep.lessonSlides : [activeStep.doc];
+  const lessonSlides = getRenderableLessonSlides(activeStep);
   const courseSteps = blueprint?.steps ?? [activeStep];
   const totalCourseMinutes = courseSteps.reduce(
     (total, step) => total + step.estimatedMinutes,
@@ -3500,6 +3500,50 @@ function BriefOverlay({
       </motion.div>
     </motion.div>
   );
+}
+
+function getRenderableLessonSlides(step: BlueprintStep): string[] {
+  if (step.lessonSlides.length === 0) {
+    return [step.doc];
+  }
+
+  const slides = step.lessonSlides
+    .map((slide) => normalizeLessonSlideToMarkdown(slide))
+    .filter((slide) => slide.trim().length > 0);
+
+  return slides.length > 0 ? slides : [step.doc];
+}
+
+function normalizeLessonSlideToMarkdown(slide: string | LessonSlide): string {
+  if (typeof slide === "string") {
+    return slide;
+  }
+
+  return slide.blocks
+    .map((block) => {
+      if (block.type === "markdown") {
+        return block.markdown;
+      }
+
+      const check = block.check;
+      const promptLines = [
+        "## Checkpoint",
+        "",
+        check.prompt
+      ];
+
+      if (check.type === "mcq") {
+        promptLines.push(
+          "",
+          ...check.options.map((option) => `- ${option.label}`)
+        );
+      } else if (check.placeholder) {
+        promptLines.push("", `_Prompt: ${check.placeholder}_`);
+      }
+
+      return promptLines.join("\n");
+    })
+    .join("\n\n");
 }
 
 function ExplorerTreeNode({

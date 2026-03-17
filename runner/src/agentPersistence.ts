@@ -78,6 +78,9 @@ export type ProjectProgressUpdate = {
 export type AgentPersistence = {
   getPlanningState(): Promise<CurrentPlanningSessionResponse | null>;
   setPlanningState(state: CurrentPlanningSessionResponse): Promise<void>;
+  getPlanningBuildCheckpoint(sessionId: string): Promise<unknown | null>;
+  setPlanningBuildCheckpoint(sessionId: string, checkpoint: unknown): Promise<void>;
+  clearPlanningBuildCheckpoint(sessionId: string): Promise<void>;
   getKnowledgeBase(): Promise<UserKnowledgeBase | null>;
   setKnowledgeBase(knowledgeBase: UserKnowledgeBase): Promise<void>;
   getActiveBlueprintState(): Promise<ActiveBlueprintState | null>;
@@ -124,24 +127,31 @@ export function createAgentPersistence(input: AgentPersistenceInput): AgentPersi
     return new PrismaAgentPersistence(input.logger);
   }
 
-  return new LocalFileAgentPersistence(input.rootDirectory);
+  return new LocalFileAgentPersistence(input.rootDirectory, input.logger);
 }
 
 class LocalFileAgentPersistence implements AgentPersistence {
   private readonly stateDirectory: string;
   private readonly planningStatePath: string;
+  private readonly planningBuildCheckpointPath: string;
   private readonly knowledgeBasePath: string;
   private readonly activeBlueprintStatePath: string;
   private readonly blueprintRecordsPath: string;
   private readonly projectsPath: string;
+  private readonly logger: AgentPersistenceLogger;
 
-  constructor(rootDirectory: string) {
+  constructor(rootDirectory: string, logger: AgentPersistenceLogger) {
     this.stateDirectory = path.join(rootDirectory, ".construct", "state");
     this.planningStatePath = path.join(this.stateDirectory, "agent-planner.json");
+    this.planningBuildCheckpointPath = path.join(
+      this.stateDirectory,
+      "planning-build-checkpoints.json"
+    );
     this.knowledgeBasePath = path.join(this.stateDirectory, "user-knowledge.json");
     this.activeBlueprintStatePath = path.join(this.stateDirectory, "active-blueprint.json");
     this.blueprintRecordsPath = path.join(this.stateDirectory, "generated-blueprints.json");
     this.projectsPath = path.join(this.stateDirectory, "projects.json");
+    this.logger = logger;
   }
 
   async getPlanningState(): Promise<CurrentPlanningSessionResponse | null> {
@@ -158,15 +168,50 @@ class LocalFileAgentPersistence implements AgentPersistence {
     await writeFile(this.planningStatePath, `${JSON.stringify(state, null, 2)}\n`, "utf8");
   }
 
+  async getPlanningBuildCheckpoint(sessionId: string): Promise<unknown | null> {
+    const checkpoints = await this.readPlanningBuildCheckpoints();
+    return checkpoints[sessionId] ?? null;
+  }
+
+  async setPlanningBuildCheckpoint(sessionId: string, checkpoint: unknown): Promise<void> {
+    const checkpoints = await this.readPlanningBuildCheckpoints();
+    checkpoints[sessionId] = checkpoint;
+    await this.writePlanningBuildCheckpoints(checkpoints);
+  }
+
+  async clearPlanningBuildCheckpoint(sessionId: string): Promise<void> {
+    const checkpoints = await this.readPlanningBuildCheckpoints();
+    if (!(sessionId in checkpoints)) {
+      return;
+    }
+
+    delete checkpoints[sessionId];
+    await this.writePlanningBuildCheckpoints(checkpoints);
+  }
+
   async getKnowledgeBase(): Promise<UserKnowledgeBase | null> {
     if (!existsSync(this.knowledgeBasePath)) {
       return null;
     }
 
-    const raw = await readFile(this.knowledgeBasePath, "utf8");
-    const parsed = UserKnowledgeBaseSchema.safeParse(JSON.parse(raw));
-    if (parsed.success) {
-      return parsed.data;
+    try {
+      const raw = await readFile(this.knowledgeBasePath, "utf8");
+      const parsed = UserKnowledgeBaseSchema.safeParse(JSON.parse(raw));
+      if (parsed.success) {
+        return parsed.data;
+      }
+
+      this.logger.warn("Stored knowledge base was invalid. Resetting to empty recursive graph.", {
+        backend: "local",
+        userId: getCurrentUserId(),
+        issueCount: parsed.error.issues.length
+      });
+    } catch (error) {
+      this.logger.warn("Stored knowledge base could not be read. Resetting to empty recursive graph.", {
+        backend: "local",
+        userId: getCurrentUserId(),
+        error: error instanceof Error ? error.message : String(error)
+      });
     }
 
     const reset = createEmptyKnowledgeBase(new Date().toISOString());
@@ -366,14 +411,37 @@ class LocalFileAgentPersistence implements AgentPersistence {
     await mkdir(this.stateDirectory, { recursive: true });
     await writeFile(this.projectsPath, `${JSON.stringify(records, null, 2)}\n`, "utf8");
   }
+
+  private async readPlanningBuildCheckpoints(): Promise<Record<string, unknown>> {
+    if (!existsSync(this.planningBuildCheckpointPath)) {
+      return {};
+    }
+
+    const raw = await readFile(this.planningBuildCheckpointPath, "utf8");
+    const parsed = z.record(z.string(), z.unknown()).safeParse(JSON.parse(raw));
+    return parsed.success ? parsed.data : {};
+  }
+
+  private async writePlanningBuildCheckpoints(
+    checkpoints: Record<string, unknown>
+  ): Promise<void> {
+    await mkdir(this.stateDirectory, { recursive: true });
+    await writeFile(
+      this.planningBuildCheckpointPath,
+      `${JSON.stringify(checkpoints, null, 2)}\n`,
+      "utf8"
+    );
+  }
 }
 
 class PrismaAgentPersistence implements AgentPersistence {
   private readonly prisma = getPrismaClient();
   private readonly userId: string;
+  private readonly logger: AgentPersistenceLogger;
 
-  constructor(_logger: AgentPersistenceLogger) {
+  constructor(logger: AgentPersistenceLogger) {
     this.userId = getCurrentUserId();
+    this.logger = logger;
   }
 
   async getPlanningState(): Promise<CurrentPlanningSessionResponse | null> {
@@ -401,6 +469,54 @@ class PrismaAgentPersistence implements AgentPersistence {
     });
   }
 
+  async getPlanningBuildCheckpoint(sessionId: string): Promise<unknown | null> {
+    const row = await this.prisma.constructState.findUnique({
+      where: {
+        key: toStateKey(this.userId, `planning_build_checkpoint:${sessionId}`)
+      }
+    });
+
+    if (!row) {
+      return null;
+    }
+
+    try {
+      return JSON.parse(row.valueJson);
+    } catch (error) {
+      this.logger.warn("Stored planning build checkpoint could not be read. Clearing it.", {
+        backend: "prisma",
+        userId: this.userId,
+        sessionId,
+        error: error instanceof Error ? error.message : String(error)
+      });
+      await this.clearPlanningBuildCheckpoint(sessionId);
+      return null;
+    }
+  }
+
+  async setPlanningBuildCheckpoint(sessionId: string, checkpoint: unknown): Promise<void> {
+    await this.prisma.constructState.upsert({
+      where: {
+        key: toStateKey(this.userId, `planning_build_checkpoint:${sessionId}`)
+      },
+      create: {
+        key: toStateKey(this.userId, `planning_build_checkpoint:${sessionId}`),
+        valueJson: JSON.stringify(checkpoint)
+      },
+      update: {
+        valueJson: JSON.stringify(checkpoint)
+      }
+    });
+  }
+
+  async clearPlanningBuildCheckpoint(sessionId: string): Promise<void> {
+    await this.prisma.constructState.deleteMany({
+      where: {
+        key: toStateKey(this.userId, `planning_build_checkpoint:${sessionId}`)
+      }
+    });
+  }
+
   async getKnowledgeBase(): Promise<UserKnowledgeBase | null> {
     const row = await this.prisma.constructState.findUnique({
       where: {
@@ -412,9 +528,23 @@ class PrismaAgentPersistence implements AgentPersistence {
       return null;
     }
 
-    const parsed = UserKnowledgeBaseSchema.safeParse(JSON.parse(row.valueJson));
-    if (parsed.success) {
-      return parsed.data;
+    try {
+      const parsed = UserKnowledgeBaseSchema.safeParse(JSON.parse(row.valueJson));
+      if (parsed.success) {
+        return parsed.data;
+      }
+
+      this.logger.warn("Stored knowledge base was invalid. Resetting to empty recursive graph.", {
+        backend: "prisma",
+        userId: this.userId,
+        issueCount: parsed.error.issues.length
+      });
+    } catch (error) {
+      this.logger.warn("Stored knowledge base could not be read. Resetting to empty recursive graph.", {
+        backend: "prisma",
+        userId: this.userId,
+        error: error instanceof Error ? error.message : String(error)
+      });
     }
 
     const reset = createEmptyKnowledgeBase(new Date().toISOString());

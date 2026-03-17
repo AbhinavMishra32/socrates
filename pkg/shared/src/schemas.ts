@@ -38,6 +38,33 @@ export const ComprehensionCheckSchema = z.discriminatedUnion("type", [
   })
 ]);
 
+export const LessonSlideBlockSchema = z.discriminatedUnion("type", [
+  z.object({
+    type: z.literal("markdown"),
+    markdown: z.string().min(1)
+  }),
+  z.object({
+    type: z.literal("check"),
+    placement: z.enum(["inline", "end"]).default("inline"),
+    check: ComprehensionCheckSchema
+  })
+]);
+
+export const LessonSlideSchema = z.object({
+  blocks: z.array(LessonSlideBlockSchema).min(1)
+});
+
+const LegacyLessonSlideSchema = z.string().min(1).transform((markdown) =>
+  LessonSlideSchema.parse({
+    blocks: [
+      {
+        type: "markdown",
+        markdown
+      }
+    ]
+  })
+);
+
 export const CheckReviewStatusSchema = z.enum([
   "complete",
   "needs-revision",
@@ -70,7 +97,9 @@ export const BlueprintStepSchema = z.object({
   title: z.string().min(1),
   summary: z.string().min(1),
   doc: z.string().min(1),
-  lessonSlides: z.array(z.string().min(1)).default([]),
+  lessonSlides: z
+    .array(z.union([LessonSlideSchema, LegacyLessonSlideSchema]))
+    .default([]),
   anchor: AnchorSchema,
   tests: z.array(z.string().min(1)).min(1),
   concepts: z.array(z.string().min(1)).min(1),
@@ -322,6 +351,8 @@ export const PlanMutationSchema = z.object({
 export type AnchorRef = z.infer<typeof AnchorSchema>;
 export type WorkspaceFileEntry = z.infer<typeof WorkspaceFileEntrySchema>;
 export type ComprehensionCheck = z.infer<typeof ComprehensionCheckSchema>;
+export type LessonSlideBlock = z.infer<typeof LessonSlideBlockSchema>;
+export type LessonSlide = z.infer<typeof LessonSlideSchema>;
 export type CheckReview = z.infer<typeof CheckReviewSchema>;
 export type CheckReviewRequest = z.infer<typeof CheckReviewRequestSchema>;
 export type CheckReviewResponse = z.infer<typeof CheckReviewResponseSchema>;

@@ -7,11 +7,23 @@ import test from "node:test";
 import type { StoredKnowledgeConcept } from "@construct/shared";
 
 import { ConstructAgentService } from "./agentService";
+import { createAgentPersistence, type AgentPersistence } from "./agentPersistence";
 import { findKnowledgeConcept } from "./knowledgeGraph";
 
 const previousStorageBackend = process.env.CONSTRUCT_STORAGE_BACKEND;
 const previousDatabaseUrl = process.env.DATABASE_URL;
 const previousDirectUrl = process.env.DIRECT_URL;
+
+function markdownSlide(markdown: string) {
+  return {
+    blocks: [
+      {
+        type: "markdown" as const,
+        markdown
+      }
+    ]
+  };
+}
 
 test.before(() => {
   process.env.CONSTRUCT_STORAGE_BACKEND = "local";
@@ -97,6 +109,12 @@ test("ConstructAgentService creates question and plan jobs and persists the resu
     },
     llm: {
       async parse({ schemaName, schema }) {
+        if (schemaName === "construct_goal_self_report_signals") {
+          return schema.parse({
+            signals: []
+          });
+        }
+
         if (schemaName === "construct_goal_scope") {
           return schema.parse({
             scopeSummary: "Large compiler project",
@@ -385,9 +403,9 @@ test("ConstructAgentService creates question and plan jobs and persists the resu
                 summary: "Convert source text into ordered word tokens.",
                 doc: "Edit src/lexer.ts so tokenize splits the incoming source into whitespace-delimited lexemes and returns Token objects in the same order. The hidden test verifies that the resulting array preserves source order and uses the shared Token shape.",
                 lessonSlides: [
-                  "## Why tokenization comes first\nA compiler never reads raw characters all the way through every later phase. The lexer creates a cleaner vocabulary for the parser by turning source text into small structured token objects. We start here because it is the first meaningful behavior that unlocks parsing while still being small enough to reason about on its own.",
-                  "## What the lexer is modeling\nFor this tiny compiler step, every whitespace-delimited word becomes a token with two pieces of information: its kind and its original lexeme. The important idea is not just splitting a string, but creating a stable sequence that preserves source order so later phases can trust the token stream.",
-                  "## Mental model for the implementation\nThink of `tokenize` as a transformation pipeline: raw source goes in, empty gaps are ignored, and each real lexeme becomes a `{ kind, lexeme }` record. If the lexer changes order or shape, the parser will read the wrong program, so deterministic mapping matters more than clever code."
+                  markdownSlide("## Why tokenization comes first\nA compiler never reads raw characters all the way through every later phase. The lexer creates a cleaner vocabulary for the parser by turning source text into small structured token objects. We start here because it is the first meaningful behavior that unlocks parsing while still being small enough to reason about on its own."),
+                  markdownSlide("## What the lexer is modeling\nFor this tiny compiler step, every whitespace-delimited word becomes a token with two pieces of information: its kind and its original lexeme. The important idea is not just splitting a string, but creating a stable sequence that preserves source order so later phases can trust the token stream."),
+                  markdownSlide("## Mental model for the implementation\nThink of `tokenize` as a transformation pipeline: raw source goes in, empty gaps are ignored, and each real lexeme becomes a `{ kind, lexeme }` record. If the lexer changes order or shape, the parser will read the wrong program, so deterministic mapping matters more than clever code.")
                 ],
                 anchor: {
                   file: "src/lexer.ts",
@@ -452,9 +470,9 @@ test("ConstructAgentService creates question and plan jobs and persists the resu
             summary: "Convert source text into ordered word tokens.",
             doc: "Edit `src/lexer.ts` at the `TASK:lexer-tokenize` anchor. Implement `tokenize(source)` so it turns whitespace-delimited words into `Token` objects in the same order they appear in the source. The hidden test checks the output shape and preserves source order.",
             lessonSlides: [
-              "## Why tokenization is the first real compiler behavior\n\nA compiler cannot reason directly about raw characters forever. The lexer creates the first stable interface for the rest of the pipeline by turning source text into structured tokens. That is why we start here: once tokenization works, the parser can depend on a predictable stream instead of re-reading raw text.\n\n## What matters in this small step\n\nFor this first version, we are intentionally keeping the token model tiny. Every non-empty whitespace-delimited word becomes a token with a `kind` and its original `lexeme`. The important lesson is not the regex itself. The important lesson is that later stages need a deterministic, ordered representation of the program.",
-              "## The data shape the parser will trust\n\nThink of a token as a small contract between stages.\n\n- `kind` tells later code how to interpret the piece of syntax\n- `lexeme` preserves the original source fragment\n- array order preserves program order\n\n## Common mistakes\n\nIf the lexer changes the order, drops values incorrectly, or returns a different shape each time, every later stage becomes harder to build. That is why this exercise focuses on producing a stable array of small records rather than on advanced compiler behavior.",
-              "## A worked mental model for `tokenize`\n\nThe implementation can be understood as a three-part pipeline:\n\n1. split the input on whitespace\n2. remove empty fragments\n3. map each real lexeme into a `Token`\n\n## Example\n\n```ts\nconst words = source.split(/\\s+/).filter(Boolean)\nreturn words.map((lexeme) => ({ kind: 'word', lexeme }))\n```\n\nThis sketch is not about cleverness. It is about making the transformation easy to read and easy to trust. Later compiler steps benefit from small, boring, deterministic code here."
+              markdownSlide("## Why tokenization is the first real compiler behavior\n\nA compiler cannot reason directly about raw characters forever. The lexer creates the first stable interface for the rest of the pipeline by turning source text into structured tokens. That is why we start here: once tokenization works, the parser can depend on a predictable stream instead of re-reading raw text.\n\n## What matters in this small step\n\nFor this first version, we are intentionally keeping the token model tiny. Every non-empty whitespace-delimited word becomes a token with a `kind` and its original `lexeme`. The important lesson is not the regex itself. The important lesson is that later stages need a deterministic, ordered representation of the program."),
+              markdownSlide("## The data shape the parser will trust\n\nThink of a token as a small contract between stages.\n\n- `kind` tells later code how to interpret the piece of syntax\n- `lexeme` preserves the original source fragment\n- array order preserves program order\n\n## Common mistakes\n\nIf the lexer changes the order, drops values incorrectly, or returns a different shape each time, every later stage becomes harder to build. That is why this exercise focuses on producing a stable array of small records rather than on advanced compiler behavior."),
+              markdownSlide("## A worked mental model for `tokenize`\n\nThe implementation can be understood as a three-part pipeline:\n\n1. split the input on whitespace\n2. remove empty fragments\n3. map each real lexeme into a `Token`\n\n## Example\n\n```ts\nconst words = source.split(/\\s+/).filter(Boolean)\nreturn words.map((lexeme) => ({ kind: 'word', lexeme }))\n```\n\nThis sketch is not about cleverness. It is about making the transformation easy to read and easy to trust. Later compiler steps benefit from small, boring, deterministic code here.")
             ],
             checks: [
               {
@@ -698,6 +716,12 @@ test("ConstructAgentService skips broad research for small local goals", async (
     },
     llm: {
       async parse({ schemaName, schema }) {
+        if (schemaName === "construct_goal_self_report_signals") {
+          return schema.parse({
+            signals: []
+          });
+        }
+
         if (schemaName === "construct_goal_scope") {
           return schema.parse({
             scopeSummary: "Tiny local class implementation",
@@ -855,9 +879,9 @@ test("ConstructAgentService skips broad research for small local goals", async (
                 summary: "Create the TodoList class.",
                 doc: "Edit todo.py to define the TodoList class in a single module, store items in memory, and expose the constructor plus add/list behavior the tests exercise. The hidden test checks that a new instance starts empty and that added items are returned in insertion order.",
                 lessonSlides: [
-                  "## Why the class itself is the first lesson\nThe learner asked for a small Python todo class, so the real artifact is the class design itself, not packaging or setup. A good first step teaches how a class holds state and exposes behavior through a tiny, readable API.",
-                  "## What state this class owns\n`TodoList` needs one simple responsibility: keep an ordered in-memory collection of todo items. That means the constructor should establish the internal list, and later methods should read from or append to that list without hiding where the data lives.",
-                  "## Why insertion order matters\nA todo list feels correct only if it gives items back in the same order the user added them. That is why the first implementation step focuses on class state and predictable list behavior instead of adding extra abstractions."
+                  markdownSlide("## Why the class itself is the first lesson\nThe learner asked for a small Python todo class, so the real artifact is the class design itself, not packaging or setup. A good first step teaches how a class holds state and exposes behavior through a tiny, readable API."),
+                  markdownSlide("## What state this class owns\n`TodoList` needs one simple responsibility: keep an ordered in-memory collection of todo items. That means the constructor should establish the internal list, and later methods should read from or append to that list without hiding where the data lives."),
+                  markdownSlide("## Why insertion order matters\nA todo list feels correct only if it gives items back in the same order the user added them. That is why the first implementation step focuses on class state and predictable list behavior instead of adding extra abstractions.")
                 ],
                 anchor: {
                   file: "todo.py",
@@ -892,9 +916,9 @@ test("ConstructAgentService skips broad research for small local goals", async (
             summary: "Create the TodoList class.",
             doc: "Edit `todo.py` at the `TASK:todo-class` anchor. Define the `TodoList` class in that single module, give it in-memory state for todo items, and implement the constructor and the add/list behavior the hidden test exercises. The hidden test checks that a new instance starts empty and that added items come back in insertion order.",
             lessonSlides: [
-              "## Why the class itself is the project\n\nThe user asked for a small Python todo class, so the first lesson should teach the class, not setup work around it. A class gives us a place to store todo items and define the tiny API the rest of the project can call.\n\n## The design goal\n\nWe want one obvious object that owns the list of tasks and exposes a small set of behaviors for adding and reading them back.",
-              "## What state this class owns\n\nA class is useful when it keeps related data and behavior together.\n\n- the constructor creates the initial empty list\n- one method appends a new todo item\n- one method returns the stored items in order\n\n## How this helps in the exercise\n\nThis is intentionally small, but it teaches a core design habit: put the data next to the behavior that manages it.",
-              "## Why insertion order matters\n\nA todo list should feel predictable. If you add `buy milk` and then `ship package`, you expect to see them returned in that same sequence.\n\n## Common mistakes\n\nThat makes insertion order part of the class contract, not just an implementation detail. The hidden test checks this because the user experience depends on it."
+              markdownSlide("## Why the class itself is the project\n\nThe user asked for a small Python todo class, so the first lesson should teach the class, not setup work around it. A class gives us a place to store todo items and define the tiny API the rest of the project can call.\n\n## The design goal\n\nWe want one obvious object that owns the list of tasks and exposes a small set of behaviors for adding and reading them back."),
+              markdownSlide("## What state this class owns\n\nA class is useful when it keeps related data and behavior together.\n\n- the constructor creates the initial empty list\n- one method appends a new todo item\n- one method returns the stored items in order\n\n## How this helps in the exercise\n\nThis is intentionally small, but it teaches a core design habit: put the data next to the behavior that manages it."),
+              markdownSlide("## Why insertion order matters\n\nA todo list should feel predictable. If you add `buy milk` and then `ship package`, you expect to see them returned in that same sequence.\n\n## Common mistakes\n\nThat makes insertion order part of the class contract, not just an implementation detail. The hidden test checks this because the user experience depends on it.")
             ],
             checks: []
           });
@@ -993,6 +1017,12 @@ test("ConstructAgentService generates lesson-first blueprints without a repair l
     },
     llm: {
       async parse({ schemaName, schema }) {
+        if (schemaName === "construct_goal_self_report_signals") {
+          return schema.parse({
+            signals: []
+          });
+        }
+
         if (schemaName === "construct_goal_scope") {
           return schema.parse({
             scopeSummary: "Small local utility class",
@@ -1151,8 +1181,8 @@ test("ConstructAgentService generates lesson-first blueprints without a repair l
                 summary: "Teach the class shape, then implement the first real read-only property.",
                 doc: "Edit systeminfo.py to complete the os_name property on SystemInfo.",
                 lessonSlides: [
-                  "A small first property on the class.",
-                  "Use platform.system()."
+                  markdownSlide("A small first property on the class."),
+                  markdownSlide("Use platform.system().")
                 ],
                 anchor: {
                   file: "systeminfo.py",
@@ -1203,9 +1233,9 @@ test("ConstructAgentService generates lesson-first blueprints without a repair l
             summary: "Teach the class shape, then implement the first real read-only property.",
             doc: "Edit `systeminfo.py` at the `TASK:systeminfo-os-name` anchor. Complete the `os_name` property on `SystemInfo` so it returns the operating-system name as a string using the Python standard library. The hidden test checks that the property can be read as `SystemInfo().os_name` and that it returns a string without exposing a write-oriented API.",
             lessonSlides: [
-              "## Why the first step is a real property, not setup\n\nThe request is for a small Python class, so the lesson should begin where the class becomes useful: the first real piece of information it can report. `SystemInfo` starts to feel like a genuine artifact the moment it can answer one machine question behind a clean interface.\n\n## Why this matters\n\nThat is why we do **not** spend this first step on packaging, environment setup, or CLI wrappers. The learner should touch the real project behavior immediately.",
-              "## What `@property` teaches in this design\n\nA property lets a class expose computed information through an attribute-like interface.\n\n- callers can read `SystemInfo().os_name` like data\n- the class still performs the lookup internally\n- the public API stays read-only and simple\n\n## Common mistakes\n\nThat is a good fit for system information because the class is presenting facts about the machine, not asking the caller to perform an action.",
-              "## How the standard library supports the implementation\n\nPython's `platform` module already knows how to report the operating-system name. The job of this step is not to invent a new lookup mechanism. It is to wrap the standard-library call inside the class so later code can depend on a stable interface.\n\n## Example\n\n```python\nimport platform\n\nplatform.system()\n```\n\nThe exercise is teaching an important design habit: use the standard library to get the fact, then place that fact behind the small API your project wants to expose."
+              markdownSlide("## Why the first step is a real property, not setup\n\nThe request is for a small Python class, so the lesson should begin where the class becomes useful: the first real piece of information it can report. `SystemInfo` starts to feel like a genuine artifact the moment it can answer one machine question behind a clean interface.\n\n## Why this matters\n\nThat is why we do **not** spend this first step on packaging, environment setup, or CLI wrappers. The learner should touch the real project behavior immediately."),
+              markdownSlide("## What `@property` teaches in this design\n\nA property lets a class expose computed information through an attribute-like interface.\n\n- callers can read `SystemInfo().os_name` like data\n- the class still performs the lookup internally\n- the public API stays read-only and simple\n\n## Common mistakes\n\nThat is a good fit for system information because the class is presenting facts about the machine, not asking the caller to perform an action."),
+              markdownSlide("## How the standard library supports the implementation\n\nPython's `platform` module already knows how to report the operating-system name. The job of this step is not to invent a new lookup mechanism. It is to wrap the standard-library call inside the class so later code can depend on a stable interface.\n\n## Example\n\n```python\nimport platform\n\nplatform.system()\n```\n\nThe exercise is teaching an important design habit: use the standard library to get the fact, then place that fact behind the small API your project wants to expose.")
             ],
             checks: [
               {
@@ -1272,29 +1302,397 @@ test("ConstructAgentService generates lesson-first blueprints without a repair l
     const generatedBlueprint = JSON.parse(
       await readFile(generatedBlueprintPath, "utf8")
     ) as {
-      steps: Array<{ title: string; lessonSlides: string[]; doc: string }>;
+      steps: Array<{
+        title: string;
+        lessonSlides: Array<{
+          blocks: Array<
+            | { type: "markdown"; markdown: string }
+            | { type: "check"; check: { id: string } }
+          >;
+        }>;
+        doc: string;
+      }>;
     };
 
     assert.match(generatedBlueprint.steps[0]!.title, /SystemInfo property/i);
     assert.ok(generatedBlueprint.steps[0]!.lessonSlides.length >= 3);
-    assert.match(generatedBlueprint.steps[0]!.lessonSlides[0]!, /^## /m);
+    const firstSlideMarkdown =
+      generatedBlueprint.steps[0]!.lessonSlides[0]!.blocks.find(
+        (block) => block.type === "markdown"
+      )?.markdown ?? "";
+    assert.match(firstSlideMarkdown, /^## /m);
+    assert.ok((firstSlideMarkdown.match(/^## /gm) ?? []).length >= 1);
     assert.ok(
-      (generatedBlueprint.steps[0]!.lessonSlides[0]!.match(/^## /gm) ?? []).length >= 1
-    );
-    assert.ok(
-      generatedBlueprint.steps[0]!.lessonSlides.some((slide) => slide.includes("```"))
+      generatedBlueprint.steps[0]!.lessonSlides.some((slide) =>
+        slide.blocks.some(
+          (block) => block.type === "markdown" && block.markdown.includes("```")
+        )
+      )
     );
     assert.ok(
       generatedBlueprint.steps[0]!.lessonSlides.some(
         (slide) =>
-          slide.includes("Why") ||
-          slide.includes("Example") ||
-          slide.includes("Common mistakes") ||
-          slide.includes("How it")
+          slide.blocks.some(
+            (block) =>
+              block.type === "markdown" &&
+              (block.markdown.includes("Why") ||
+                block.markdown.includes("Example") ||
+                block.markdown.includes("Common mistakes") ||
+                block.markdown.includes("How it"))
+          )
       )
     );
     assert.doesNotMatch(generatedBlueprint.steps[0]!.title, /bootstrap|environment/i);
     assert.match(generatedBlueprint.steps[0]!.doc, /Edit `?systeminfo\.py`?/i);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("ConstructAgentService resumes blueprint creation from the last saved stage after a late persistence failure", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "construct-agent-plan-resume-"));
+  let planCalls = 0;
+  let blueprintCalls = 0;
+  let lessonAuthoringCalls = 0;
+  let activationFailures = 0;
+
+  const basePersistence = createAgentPersistence({
+    rootDirectory: root,
+    logger: {
+      info() {},
+      warn() {},
+      error() {}
+    }
+  });
+
+  const persistence: AgentPersistence = {
+    getPlanningState: () => basePersistence.getPlanningState(),
+    setPlanningState: (state) => basePersistence.setPlanningState(state),
+    getPlanningBuildCheckpoint: (sessionId) =>
+      basePersistence.getPlanningBuildCheckpoint(sessionId),
+    setPlanningBuildCheckpoint: (sessionId, checkpoint) =>
+      basePersistence.setPlanningBuildCheckpoint(sessionId, checkpoint),
+    clearPlanningBuildCheckpoint: (sessionId) =>
+      basePersistence.clearPlanningBuildCheckpoint(sessionId),
+    getKnowledgeBase: () => basePersistence.getKnowledgeBase(),
+    setKnowledgeBase: (knowledgeBase) => basePersistence.setKnowledgeBase(knowledgeBase),
+    getActiveBlueprintState: () => basePersistence.getActiveBlueprintState(),
+    setActiveBlueprintState: (state) => basePersistence.setActiveBlueprintState(state),
+    getGeneratedBlueprintRecord: (sessionId) =>
+      basePersistence.getGeneratedBlueprintRecord(sessionId),
+    async saveGeneratedBlueprintRecord(record) {
+      if (activationFailures === 0) {
+        activationFailures += 1;
+        throw new Error("Simulated activation failure");
+      }
+    },
+    listProjects: () => basePersistence.listProjects(),
+    getActiveProject: () => basePersistence.getActiveProject(),
+    getProject: (projectId) => basePersistence.getProject(projectId),
+    setActiveProject: (projectId) => basePersistence.setActiveProject(projectId),
+    updateProjectProgress: (update) => basePersistence.updateProjectProgress(update)
+  };
+
+  const service = new ConstructAgentService(root, {
+    now: () => new Date("2026-03-17T12:00:00.000Z"),
+    persistence,
+    search: {
+      async research(query) {
+        return {
+          query,
+          answer: "Start with the first meaningful project behavior and keep the initial scope small.",
+          sources: []
+        };
+      }
+    },
+    projectInstaller: {
+      async install() {
+        return {
+          status: "skipped",
+          packageManager: "none",
+          detail: "No install step needed for the regression."
+        };
+      }
+    },
+    llm: {
+      async parse({ schemaName, schema }) {
+        if (schemaName === "construct_goal_self_report_signals") {
+          return schema.parse({ signals: [] });
+        }
+
+        if (schemaName === "construct_goal_scope") {
+          return schema.parse({
+            scopeSummary: "Small single-module project",
+            artifactShape: "single file module",
+            complexityScore: 15,
+            shouldResearch: false,
+            recommendedQuestionCount: 2,
+            recommendedMinSteps: 1,
+            recommendedMaxSteps: 3,
+            rationale: "The project is compact enough to avoid broad external research."
+          });
+        }
+
+        if (schemaName === "construct_planning_question_draft") {
+          return schema.parse({
+            detectedLanguage: "typescript",
+            detectedDomain: "tiny parser utility",
+            questions: [
+              {
+                conceptId: "typescript.functions",
+                category: "language",
+                prompt: "How comfortable are you with small TypeScript utility functions?",
+                options: [
+                  {
+                    id: "solid",
+                    label: "I write them comfortably",
+                    description: "I can work with small functions and types without much help.",
+                    confidenceSignal: "comfortable"
+                  },
+                  {
+                    id: "partial",
+                    label: "I know the basics but still want guidance",
+                    description: "I can follow examples, but I still want support while implementing.",
+                    confidenceSignal: "shaky"
+                  },
+                  {
+                    id: "new",
+                    label: "This is still new to me",
+                    description: "I need the fundamentals taught clearly before I code.",
+                    confidenceSignal: "new"
+                  }
+                ]
+              },
+              {
+                conceptId: "domain.module-graph",
+                category: "domain",
+                prompt: "How familiar are you with a simple module graph?",
+                options: [
+                  {
+                    id: "solid",
+                    label: "I know the idea well",
+                    description: "I understand modules, imports, and dependency edges clearly.",
+                    confidenceSignal: "comfortable"
+                  },
+                  {
+                    id: "partial",
+                    label: "I know the idea but need examples",
+                    description: "I understand the concept, but I still want concrete walkthroughs.",
+                    confidenceSignal: "shaky"
+                  },
+                  {
+                    id: "new",
+                    label: "This is new to me",
+                    description: "I need the project to teach the concept from scratch.",
+                    confidenceSignal: "new"
+                  }
+                ]
+              }
+            ]
+          });
+        }
+
+        if (schemaName === "construct_generated_project_plan") {
+          planCalls += 1;
+          return schema.parse({
+            summary: "Teach a tiny module-graph parser and then implement the first real function.",
+            knowledgeGraph: {
+              concepts: [
+                {
+                  id: "typescript.functions",
+                  label: "TypeScript utility functions",
+                  category: "language",
+                  path: ["typescript", "functions"],
+                  labelPath: ["TypeScript", "Functions"],
+                  confidence: "shaky",
+                  rationale: "The learner wants guidance on small function design."
+                }
+              ],
+              strengths: [],
+              gaps: ["Module graph basics"]
+            },
+            architecture: [
+              {
+                id: "component.parser",
+                label: "Import parser",
+                kind: "component",
+                summary: "Parses import edges from a tiny TypeScript file.",
+                dependsOn: []
+              }
+            ],
+            steps: [
+              {
+                id: "step.parse-imports",
+                title: "Parse imports from one file",
+                kind: "implementation",
+                objective: "Teach the import-extraction concept and implement the first parser function.",
+                rationale: "The first step should produce the first real dependency edge.",
+                concepts: ["typescript.functions", "domain.module-graph"],
+                dependsOn: [],
+                validationFocus: ["returns an import edge for one import"],
+                suggestedFiles: ["src/parser.ts"],
+                implementationNotes: ["Keep the regex narrow and educational."],
+                quizFocus: ["Can explain what an import edge represents."],
+                hiddenValidationFocus: ["single import path is captured"]
+              }
+            ],
+            suggestedFirstStepId: "step.parse-imports"
+          });
+        }
+
+        if (schemaName === "construct_generated_blueprint_bundle") {
+          blueprintCalls += 1;
+          return schema.parse({
+            projectName: "tiny-module-graph",
+            projectSlug: "tiny-module-graph",
+            description: "A tiny TypeScript project that extracts import edges from one file.",
+            language: "typescript",
+            entrypoints: ["src/parser.ts"],
+            supportFiles: [
+              {
+                path: "package.json",
+                content: "{\n  \"name\": \"tiny-module-graph\"\n}\n"
+              }
+            ],
+            canonicalFiles: [
+              {
+                path: "src/parser.ts",
+                content: "export function parseImports(source: string): string[] {\n  return Array.from(source.matchAll(/from\\s+['\\\"]([^'\\\"]+)['\\\"]/g)).map((match) => match[1] ?? \"\");\n}\n"
+              }
+            ],
+            learnerFiles: [
+              {
+                path: "src/parser.ts",
+                content: "export function parseImports(source: string): string[] {\n  // TASK:parse-imports\n  throw new Error(\"Implement parseImports\");\n}\n"
+              }
+            ],
+            hiddenTests: [
+              {
+                path: "tests/parser.test.ts",
+                content: "import { parseImports } from '../src/parser';\n\ntest('captures a single import path', () => {\n  expect(parseImports(\"import { x } from './dep';\")).toEqual(['./dep']);\n});\n"
+              }
+            ],
+            steps: [
+              {
+                id: "step.parse-imports",
+                title: "Parse imports from one file",
+                summary: "Teach the first import edge and implement the parser function.",
+                doc: "Edit `src/parser.ts` and implement `parseImports`.",
+                lessonSlides: [
+                  markdownSlide("## Start with one edge\n\nWe only need one file and one import edge for the first pass."),
+                  markdownSlide("## Keep the parser tiny\n\nA narrow regex is fine for this educational step.")
+                ],
+                anchor: {
+                  file: "src/parser.ts",
+                  marker: "TASK:parse-imports",
+                  startLine: null,
+                  endLine: null
+                },
+                tests: ["tests/parser.test.ts"],
+                concepts: ["typescript.functions", "domain.module-graph"],
+                constraints: ["Keep the implementation intentionally small."],
+                checks: [
+                  {
+                    id: "check.import-edge",
+                    type: "mcq",
+                    prompt: "What does the first parser return?",
+                    options: [
+                      { id: "a", label: "A list of import paths", rationale: null },
+                      { id: "b", label: "A full AST", rationale: null }
+                    ],
+                    answer: "a"
+                  }
+                ],
+                estimatedMinutes: 15,
+                difficulty: "intro"
+              }
+            ],
+            dependencyGraph: {
+              nodes: [
+                { id: "component.parser", label: "Import parser", kind: "component" }
+              ],
+              edges: []
+            },
+            tags: ["typescript", "parser"]
+          });
+        }
+
+        if (schemaName === "construct_authored_blueprint_step") {
+          lessonAuthoringCalls += 1;
+          return schema.parse({
+            summary: "Teach one import edge and then implement the parser function.",
+            doc: "Edit `src/parser.ts` at the `TASK:parse-imports` anchor. Implement `parseImports(source)` so it returns the relative import paths it finds in the source text. The hidden test checks a single import first, so the goal is one correct edge, not a production parser.",
+            lessonSlides: [
+              markdownSlide("## What this function is really doing\n\nA module graph starts when one file points to another. In this first step, the parser only needs to discover that edge."),
+              markdownSlide("## Why a tiny regex is acceptable here\n\nWe are teaching the shape of the problem first, not building a production TypeScript parser."),
+              markdownSlide("## How the exercise connects\n\nOnce you can return one import path from one source string, the next steps can scale that idea into a graph.")
+            ],
+            checks: [
+              {
+                id: "check.import-edge",
+                type: "mcq",
+                prompt: "What should the first parser return?",
+                options: [
+                  { id: "a", label: "A list of import paths", rationale: null },
+                  { id: "b", label: "A full syntax tree", rationale: null }
+                ],
+                answer: "a"
+              }
+            ]
+          });
+        }
+
+        throw new Error(`Unexpected schema request: ${schemaName}`);
+      }
+    }
+  });
+
+  try {
+    const questionJob = service.createPlanningQuestionsJob({
+      goal: "small typescript parser utility",
+      learningStyle: "concept-first"
+    });
+    const questionResult = await waitForJobCompletion(service, questionJob.jobId);
+    const questionSession = questionResult.result as {
+      session: { sessionId: string; questions: Array<{ id: string; options: Array<{ id: string }> }> };
+    };
+
+    const request = {
+      sessionId: questionSession.session.sessionId,
+      answers: questionSession.session.questions.map((question) => ({
+        questionId: question.id,
+        answerType: "option" as const,
+        optionId: question.options[1]?.id ?? question.options[0]!.id
+      }))
+    };
+
+    const firstPlanJob = service.createPlanningPlanJob(request);
+    await assert.rejects(
+      () => waitForJobCompletion(service, firstPlanJob.jobId),
+      /Simulated activation failure/
+    );
+
+    const savedCheckpoint = await basePersistence.getPlanningBuildCheckpoint(
+      questionSession.session.sessionId
+    );
+
+    assert.ok(savedCheckpoint);
+    assert.equal(planCalls, 1);
+    assert.equal(blueprintCalls, 1);
+    assert.equal(lessonAuthoringCalls, 1);
+
+    const retryPlanJob = service.createPlanningPlanJob(request);
+    const retryResult = await waitForJobCompletion(service, retryPlanJob.jobId);
+    const planPayload = retryResult.result as { plan: { steps: Array<{ id: string }> } };
+
+    assert.equal(planPayload.plan.steps.length, 1);
+    assert.equal(planCalls, 1);
+    assert.equal(blueprintCalls, 1);
+    assert.equal(lessonAuthoringCalls, 1);
+    assert.equal(
+      await basePersistence.getPlanningBuildCheckpoint(questionSession.session.sessionId),
+      null
+    );
   } finally {
     await rm(root, { recursive: true, force: true });
   }

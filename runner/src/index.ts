@@ -470,8 +470,10 @@ const server = http.createServer(async (request, response) => {
       error
     );
 
-    if (response.headersSent) {
-      response.end();
+    if (response.headersSent || response.writableEnded || response.destroyed) {
+      if (!response.writableEnded && !response.destroyed) {
+        response.end();
+      }
       return;
     }
 

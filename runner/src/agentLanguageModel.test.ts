@@ -115,3 +115,68 @@ test("OpenAIStructuredLanguageModel forwards streaming tokens through callbacks"
   assert.equal(parsed.value, "streamed");
   assert.deepEqual(streamedChunks, ["{", "\"value\":\"streamed\"", "}"]);
 });
+
+test("OpenAIStructuredLanguageModel repairs malformed JSON fallback output", async () => {
+  let structuredCalls = 0;
+  let fallbackCalls = 0;
+  let repairCalls = 0;
+
+  const model = new OpenAIStructuredLanguageModel({
+    apiKey: "test-key",
+    model: "gpt-5-mini",
+    logger: {
+      info() {},
+      warn() {},
+      error() {},
+      debug() {},
+      trace() {}
+    },
+    client: {
+      withStructuredOutput() {
+        return {
+          async invoke() {
+            structuredCalls += 1;
+            throw new Error(
+              "invalid schema for response_format 'test_schema': object schema missing properties"
+            );
+          }
+        };
+      },
+      async invoke(messages, config) {
+        const mode = String(config?.metadata?.mode ?? "");
+
+        if (mode === "json-fallback") {
+          fallbackCalls += 1;
+          return {
+            content: '{"value": fifty}'
+          };
+        }
+
+        if (mode === "json-repair") {
+          repairCalls += 1;
+          return {
+            content: JSON.stringify({
+              value: 50
+            })
+          };
+        }
+
+        throw new Error(`Unexpected invoke mode: ${mode} :: ${JSON.stringify(messages)}`);
+      }
+    }
+  });
+
+  const parsed = await model.parse({
+    schema: z.object({
+      value: z.number()
+    }),
+    schemaName: "test_schema",
+    instructions: "Return test data.",
+    prompt: "Generate a payload."
+  });
+
+  assert.equal(parsed.value, 50);
+  assert.equal(structuredCalls, 1);
+  assert.equal(fallbackCalls, 1);
+  assert.equal(repairCalls, 1);
+});
