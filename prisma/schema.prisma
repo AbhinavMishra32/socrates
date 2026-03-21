@@ -48,3 +48,82 @@ model Project {
   @@index([userId, lastOpenedAt])
   @@map("construct_blueprints")
 }
+
+model BlueprintBuild {
+  id                 String                @id
+  sessionId          String?               @unique @map("session_id")
+  userId             String                @default("local-user") @map("user_id")
+  goal               String
+  learningStyle      String?               @map("learning_style")
+  detectedLanguage   String?               @map("detected_language")
+  detectedDomain     String?               @map("detected_domain")
+  status             String
+  currentStage       String?               @map("current_stage")
+  currentStageTitle  String?               @map("current_stage_title")
+  currentStageStatus String?               @map("current_stage_status")
+  lastError          String?               @map("last_error") @db.Text
+  langSmithProject   String?               @map("langsmith_project")
+  traceUrl           String?               @map("trace_url") @db.Text
+  planningSessionJson String?              @map("planning_session_json") @db.Text
+  answersJson        String                @default("[]") @map("answers_json") @db.Text
+  planJson           String?               @map("plan_json") @db.Text
+  blueprintJson      String?               @map("blueprint_json") @db.Text
+  blueprintDraftJson String?               @map("blueprint_draft_json") @db.Text
+  supportFilesJson   String                @default("[]") @map("support_files_json") @db.Text
+  canonicalFilesJson String                @default("[]") @map("canonical_files_json") @db.Text
+  learnerFilesJson   String                @default("[]") @map("learner_files_json") @db.Text
+  hiddenTestsJson    String                @default("[]") @map("hidden_tests_json") @db.Text
+  createdAt          DateTime              @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt          DateTime              @updatedAt @map("updated_at") @db.Timestamptz(6)
+  completedAt        DateTime?             @map("completed_at") @db.Timestamptz(6)
+  lastEventAt        DateTime?             @map("last_event_at") @db.Timestamptz(6)
+
+  stages             BlueprintBuildStage[]
+  events             BlueprintBuildEvent[]
+
+  @@index([userId, updatedAt])
+  @@index([userId, status])
+  @@index([userId, lastEventAt])
+  @@map("construct_blueprint_builds")
+}
+
+model BlueprintBuildStage {
+  id          String          @id
+  buildId     String          @map("build_id")
+  stage       String
+  title       String
+  status      String
+  detail      String?         @db.Text
+  inputJson   String?         @map("input_json") @db.Text
+  outputJson  String?         @map("output_json") @db.Text
+  metadataJson String?        @map("metadata_json") @db.Text
+  traceUrl    String?         @map("trace_url") @db.Text
+  startedAt   DateTime        @map("started_at") @db.Timestamptz(6)
+  updatedAt   DateTime        @updatedAt @map("updated_at") @db.Timestamptz(6)
+  completedAt DateTime?       @map("completed_at") @db.Timestamptz(6)
+
+  build       BlueprintBuild  @relation(fields: [buildId], references: [id], onDelete: Cascade)
+
+  @@unique([buildId, stage])
+  @@index([buildId, updatedAt])
+  @@map("construct_blueprint_build_stages")
+}
+
+model BlueprintBuildEvent {
+  id         String          @id
+  buildId    String          @map("build_id")
+  jobId      String?         @map("job_id")
+  kind       String?
+  stage      String
+  title      String
+  detail     String?         @db.Text
+  level      String
+  payloadJson String?        @map("payload_json") @db.Text
+  traceUrl   String?         @map("trace_url") @db.Text
+  timestamp  DateTime        @db.Timestamptz(6)
+
+  build      BlueprintBuild  @relation(fields: [buildId], references: [id], onDelete: Cascade)
+
+  @@index([buildId, timestamp])
+  @@map("construct_blueprint_build_events")
+}

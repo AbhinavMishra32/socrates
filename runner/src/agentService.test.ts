@@ -569,6 +569,18 @@ test("ConstructAgentService creates question and plan jobs and persists the resu
     const persistedPlanningState = await service.getCurrentPlanningState();
     assert.ok(persistedPlanningState.session);
     assert.ok(persistedPlanningState.plan);
+    assert.equal(persistedPlanningState.answers.length, 4);
+
+    const blueprintBuilds = await service.listBlueprintBuilds();
+    const activeBuild =
+      blueprintBuilds.find((build) => build.sessionId === questionSession.session.sessionId) ?? null;
+    const blueprintBuildDetail = activeBuild
+      ? await service.getBlueprintBuildDetail(activeBuild.id)
+      : null;
+
+    assert.equal(activeBuild?.status, "completed");
+    assert.ok(blueprintBuildDetail?.events.some((event) => event.stage === "blueprint-activation"));
+    assert.ok(blueprintBuildDetail?.stages.some((stage) => stage.stage === "plan-generation"));
 
     const generatedProjectDirectories = await readdir(
       path.join(root, ".construct", "generated-blueprints")
@@ -1390,7 +1402,15 @@ test("ConstructAgentService resumes blueprint creation from the last saved stage
     getActiveProject: () => basePersistence.getActiveProject(),
     getProject: (projectId) => basePersistence.getProject(projectId),
     setActiveProject: (projectId) => basePersistence.setActiveProject(projectId),
-    updateProjectProgress: (update) => basePersistence.updateProjectProgress(update)
+    updateProjectProgress: (update) => basePersistence.updateProjectProgress(update),
+    getBlueprintBuild: (buildId) => basePersistence.getBlueprintBuild(buildId),
+    getBlueprintBuildBySession: (sessionId) =>
+      basePersistence.getBlueprintBuildBySession(sessionId),
+    upsertBlueprintBuild: (build) => basePersistence.upsertBlueprintBuild(build),
+    upsertBlueprintBuildStage: (stage) => basePersistence.upsertBlueprintBuildStage(stage),
+    appendBlueprintBuildEvent: (event) => basePersistence.appendBlueprintBuildEvent(event),
+    getBlueprintBuildDetail: (buildId) => basePersistence.getBlueprintBuildDetail(buildId),
+    listBlueprintBuilds: () => basePersistence.listBlueprintBuilds()
   };
 
   const service = new ConstructAgentService(root, {

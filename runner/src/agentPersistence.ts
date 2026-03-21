@@ -3,12 +3,22 @@ import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 
 import {
+  BlueprintBuildDetailResponseSchema,
+  BlueprintBuildEventRecordSchema,
+  BlueprintBuildListResponseSchema,
+  BlueprintBuildSchema,
+  BlueprintBuildStageSchema,
   CurrentPlanningSessionResponseSchema,
   GeneratedProjectPlanSchema,
   ProjectAttemptStatusSchema,
   ProjectBlueprintSchema,
   ProjectSummarySchema,
   UserKnowledgeBaseSchema,
+  type BlueprintBuild,
+  type BlueprintBuildDetailResponse,
+  type BlueprintBuildEventRecord,
+  type BlueprintBuildStage,
+  type BlueprintBuildSummary,
   type CurrentPlanningSessionResponse,
   type GeneratedProjectPlan,
   type ProjectAttemptStatus,
@@ -57,6 +67,9 @@ const PersistedProjectRecordSchema = ProjectSummarySchema.omit({
 });
 
 const PersistedProjectRecordListSchema = z.array(PersistedProjectRecordSchema);
+const PersistedBlueprintBuildListSchema = z.array(BlueprintBuildSchema);
+const PersistedBlueprintBuildStageListSchema = z.array(BlueprintBuildStageSchema);
+const PersistedBlueprintBuildEventListSchema = z.array(BlueprintBuildEventRecordSchema);
 
 export type ActiveBlueprintState = z.infer<typeof ActiveBlueprintStateSchema>;
 export type PersistedGeneratedBlueprintRecord = z.infer<
@@ -92,6 +105,13 @@ export type AgentPersistence = {
   getProject(projectId: string): Promise<ProjectSummary | null>;
   setActiveProject(projectId: string): Promise<ProjectSummary | null>;
   updateProjectProgress(update: ProjectProgressUpdate): Promise<ProjectSummary | null>;
+  getBlueprintBuild(buildId: string): Promise<BlueprintBuild | null>;
+  getBlueprintBuildBySession(sessionId: string): Promise<BlueprintBuild | null>;
+  upsertBlueprintBuild(build: BlueprintBuild): Promise<void>;
+  upsertBlueprintBuildStage(stage: BlueprintBuildStage): Promise<void>;
+  appendBlueprintBuildEvent(event: BlueprintBuildEventRecord): Promise<void>;
+  getBlueprintBuildDetail(buildId: string): Promise<BlueprintBuildDetailResponse>;
+  listBlueprintBuilds(): Promise<BlueprintBuildSummary[]>;
 };
 
 type AgentPersistenceLogger = {
@@ -138,6 +158,9 @@ class LocalFileAgentPersistence implements AgentPersistence {
   private readonly activeBlueprintStatePath: string;
   private readonly blueprintRecordsPath: string;
   private readonly projectsPath: string;
+  private readonly blueprintBuildsPath: string;
+  private readonly blueprintBuildStagesPath: string;
+  private readonly blueprintBuildEventsPath: string;
   private readonly logger: AgentPersistenceLogger;
 
   constructor(rootDirectory: string, logger: AgentPersistenceLogger) {
@@ -151,6 +174,9 @@ class LocalFileAgentPersistence implements AgentPersistence {
     this.activeBlueprintStatePath = path.join(this.stateDirectory, "active-blueprint.json");
     this.blueprintRecordsPath = path.join(this.stateDirectory, "generated-blueprints.json");
     this.projectsPath = path.join(this.stateDirectory, "projects.json");
+    this.blueprintBuildsPath = path.join(this.stateDirectory, "blueprint-builds.json");
+    this.blueprintBuildStagesPath = path.join(this.stateDirectory, "blueprint-build-stages.json");
+    this.blueprintBuildEventsPath = path.join(this.stateDirectory, "blueprint-build-events.json");
     this.logger = logger;
   }
 
@@ -378,6 +404,62 @@ class LocalFileAgentPersistence implements AgentPersistence {
     return toProjectSummary(nextProject);
   }
 
+  async getBlueprintBuild(buildId: string): Promise<BlueprintBuild | null> {
+    const builds = await this.readBlueprintBuilds();
+    return builds.find((build) => build.id === buildId) ?? null;
+  }
+
+  async getBlueprintBuildBySession(sessionId: string): Promise<BlueprintBuild | null> {
+    const builds = await this.readBlueprintBuilds();
+    return builds.find((build) => build.sessionId === sessionId) ?? null;
+  }
+
+  async upsertBlueprintBuild(build: BlueprintBuild): Promise<void> {
+    const parsed = BlueprintBuildSchema.parse(build);
+    const builds = await this.readBlueprintBuilds();
+    const nextBuilds = builds.filter((entry) => entry.id !== parsed.id);
+    nextBuilds.unshift(parsed);
+    await this.writeBlueprintBuilds(sortBlueprintBuilds(nextBuilds));
+  }
+
+  async upsertBlueprintBuildStage(stage: BlueprintBuildStage): Promise<void> {
+    const parsed = BlueprintBuildStageSchema.parse(stage);
+    const stages = await this.readBlueprintBuildStages();
+    const nextStages = stages.filter(
+      (entry) => !(entry.buildId === parsed.buildId && entry.stage === parsed.stage)
+    );
+    nextStages.push(parsed);
+    await this.writeBlueprintBuildStages(sortBlueprintBuildStages(nextStages));
+  }
+
+  async appendBlueprintBuildEvent(event: BlueprintBuildEventRecord): Promise<void> {
+    const parsed = BlueprintBuildEventRecordSchema.parse(event);
+    const events = await this.readBlueprintBuildEvents();
+    events.push(parsed);
+    await this.writeBlueprintBuildEvents(sortBlueprintBuildEvents(events));
+  }
+
+  async getBlueprintBuildDetail(buildId: string): Promise<BlueprintBuildDetailResponse> {
+    const [build, stages, events] = await Promise.all([
+      this.getBlueprintBuild(buildId),
+      this.readBlueprintBuildStages(),
+      this.readBlueprintBuildEvents()
+    ]);
+
+    return BlueprintBuildDetailResponseSchema.parse({
+      build,
+      stages: stages.filter((stage) => stage.buildId === buildId),
+      events: events.filter((event) => event.buildId === buildId)
+    });
+  }
+
+  async listBlueprintBuilds(): Promise<BlueprintBuildSummary[]> {
+    const builds = await this.readBlueprintBuilds();
+    return BlueprintBuildListResponseSchema.parse({
+      builds: sortBlueprintBuilds(builds)
+    }).builds;
+  }
+
   private async readBlueprintRecords(): Promise<PersistedGeneratedBlueprintRecord[]> {
     if (!existsSync(this.blueprintRecordsPath)) {
       return [];
@@ -410,6 +492,60 @@ class LocalFileAgentPersistence implements AgentPersistence {
   private async writeProjects(records: PersistedProjectRecord[]): Promise<void> {
     await mkdir(this.stateDirectory, { recursive: true });
     await writeFile(this.projectsPath, `${JSON.stringify(records, null, 2)}\n`, "utf8");
+  }
+
+  private async readBlueprintBuilds(): Promise<BlueprintBuild[]> {
+    if (!existsSync(this.blueprintBuildsPath)) {
+      return [];
+    }
+
+    const raw = await readFile(this.blueprintBuildsPath, "utf8");
+    return PersistedBlueprintBuildListSchema.parse(JSON.parse(raw));
+  }
+
+  private async writeBlueprintBuilds(builds: BlueprintBuild[]): Promise<void> {
+    await mkdir(this.stateDirectory, { recursive: true });
+    await writeFile(
+      this.blueprintBuildsPath,
+      `${JSON.stringify(builds, null, 2)}\n`,
+      "utf8"
+    );
+  }
+
+  private async readBlueprintBuildStages(): Promise<BlueprintBuildStage[]> {
+    if (!existsSync(this.blueprintBuildStagesPath)) {
+      return [];
+    }
+
+    const raw = await readFile(this.blueprintBuildStagesPath, "utf8");
+    return PersistedBlueprintBuildStageListSchema.parse(JSON.parse(raw));
+  }
+
+  private async writeBlueprintBuildStages(stages: BlueprintBuildStage[]): Promise<void> {
+    await mkdir(this.stateDirectory, { recursive: true });
+    await writeFile(
+      this.blueprintBuildStagesPath,
+      `${JSON.stringify(stages, null, 2)}\n`,
+      "utf8"
+    );
+  }
+
+  private async readBlueprintBuildEvents(): Promise<BlueprintBuildEventRecord[]> {
+    if (!existsSync(this.blueprintBuildEventsPath)) {
+      return [];
+    }
+
+    const raw = await readFile(this.blueprintBuildEventsPath, "utf8");
+    return PersistedBlueprintBuildEventListSchema.parse(JSON.parse(raw));
+  }
+
+  private async writeBlueprintBuildEvents(events: BlueprintBuildEventRecord[]): Promise<void> {
+    await mkdir(this.stateDirectory, { recursive: true });
+    await writeFile(
+      this.blueprintBuildEventsPath,
+      `${JSON.stringify(events, null, 2)}\n`,
+      "utf8"
+    );
   }
 
   private async readPlanningBuildCheckpoints(): Promise<Record<string, unknown>> {
@@ -783,6 +919,127 @@ class PrismaAgentPersistence implements AgentPersistence {
 
     return toProjectSummaryFromPrisma(updatedProject);
   }
+
+  async getBlueprintBuild(buildId: string): Promise<BlueprintBuild | null> {
+    const build = await this.prisma.blueprintBuild.findFirst({
+      where: {
+        userId: this.userId,
+        id: buildId
+      }
+    });
+
+    return build ? toBlueprintBuildFromPrisma(build) : null;
+  }
+
+  async getBlueprintBuildBySession(sessionId: string): Promise<BlueprintBuild | null> {
+    const build = await this.prisma.blueprintBuild.findFirst({
+      where: {
+        userId: this.userId,
+        sessionId
+      }
+    });
+
+    return build ? toBlueprintBuildFromPrisma(build) : null;
+  }
+
+  async upsertBlueprintBuild(build: BlueprintBuild): Promise<void> {
+    const parsed = BlueprintBuildSchema.parse(build);
+
+    await this.prisma.blueprintBuild.upsert({
+      where: {
+        id: parsed.id
+      },
+      create: mapBlueprintBuildCreateInput(parsed),
+      update: mapBlueprintBuildUpdateInput(parsed)
+    });
+  }
+
+  async upsertBlueprintBuildStage(stage: BlueprintBuildStage): Promise<void> {
+    const parsed = BlueprintBuildStageSchema.parse(stage);
+
+    await this.prisma.blueprintBuildStage.upsert({
+      where: {
+        buildId_stage: {
+          buildId: parsed.buildId,
+          stage: parsed.stage
+        }
+      },
+      create: mapBlueprintBuildStageCreateInput(parsed),
+      update: mapBlueprintBuildStageUpdateInput(parsed)
+    });
+  }
+
+  async appendBlueprintBuildEvent(event: BlueprintBuildEventRecord): Promise<void> {
+    const parsed = BlueprintBuildEventRecordSchema.parse(event);
+
+    await this.prisma.blueprintBuildEvent.create({
+      data: mapBlueprintBuildEventCreateInput(parsed)
+    });
+  }
+
+  async getBlueprintBuildDetail(buildId: string): Promise<BlueprintBuildDetailResponse> {
+    const [build, stages, events] = await Promise.all([
+      this.prisma.blueprintBuild.findFirst({
+        where: {
+          userId: this.userId,
+          id: buildId
+        }
+      }),
+      this.prisma.blueprintBuildStage.findMany({
+        where: {
+          build: {
+            userId: this.userId
+          },
+          buildId
+        },
+        orderBy: [
+          {
+            startedAt: "asc"
+          },
+          {
+            updatedAt: "asc"
+          }
+        ]
+      }),
+      this.prisma.blueprintBuildEvent.findMany({
+        where: {
+          build: {
+            userId: this.userId
+          },
+          buildId
+        },
+        orderBy: {
+          timestamp: "asc"
+        }
+      })
+    ]);
+
+    return BlueprintBuildDetailResponseSchema.parse({
+      build: build ? toBlueprintBuildFromPrisma(build) : null,
+      stages: stages.map(toBlueprintBuildStageFromPrisma),
+      events: events.map(toBlueprintBuildEventFromPrisma)
+    });
+  }
+
+  async listBlueprintBuilds(): Promise<BlueprintBuildSummary[]> {
+    const builds = await this.prisma.blueprintBuild.findMany({
+      where: {
+        userId: this.userId
+      },
+      orderBy: [
+        {
+          updatedAt: "desc"
+        },
+        {
+          createdAt: "desc"
+        }
+      ]
+    });
+
+    return BlueprintBuildListResponseSchema.parse({
+      builds: builds.map(toBlueprintBuildFromPrisma)
+    }).builds;
+  }
 }
 
 function resolveStorageBackend(): StorageBackend {
@@ -1080,12 +1337,286 @@ function toGeneratedBlueprintRecord(project: {
   });
 }
 
+function sortBlueprintBuilds(builds: BlueprintBuild[]): BlueprintBuild[] {
+  return [...builds].sort((left, right) => {
+    const leftTimestamp = left.lastEventAt ?? left.updatedAt ?? left.createdAt;
+    const rightTimestamp = right.lastEventAt ?? right.updatedAt ?? right.createdAt;
+    return Date.parse(rightTimestamp) - Date.parse(leftTimestamp);
+  });
+}
+
+function sortBlueprintBuildStages(stages: BlueprintBuildStage[]): BlueprintBuildStage[] {
+  return [...stages].sort((left, right) => {
+    if (left.buildId !== right.buildId) {
+      return left.buildId.localeCompare(right.buildId);
+    }
+
+    return Date.parse(left.startedAt) - Date.parse(right.startedAt);
+  });
+}
+
+function sortBlueprintBuildEvents(
+  events: BlueprintBuildEventRecord[]
+): BlueprintBuildEventRecord[] {
+  return [...events].sort(
+    (left, right) => Date.parse(left.timestamp) - Date.parse(right.timestamp)
+  );
+}
+
+function mapBlueprintBuildCreateInput(build: BlueprintBuild) {
+  return {
+    id: build.id,
+    sessionId: build.sessionId,
+    userId: build.userId,
+    goal: build.goal,
+    learningStyle: build.learningStyle,
+    detectedLanguage: build.detectedLanguage,
+    detectedDomain: build.detectedDomain,
+    status: build.status,
+    currentStage: build.currentStage,
+    currentStageTitle: build.currentStageTitle,
+    currentStageStatus: build.currentStageStatus,
+    lastError: build.lastError,
+    langSmithProject: build.langSmithProject,
+    traceUrl: build.traceUrl,
+    planningSessionJson: build.planningSession
+      ? JSON.stringify(build.planningSession)
+      : null,
+    answersJson: JSON.stringify(build.answers),
+    planJson: build.plan ? JSON.stringify(build.plan) : null,
+    blueprintJson: build.blueprint ? JSON.stringify(build.blueprint) : null,
+    blueprintDraftJson: build.blueprintDraft ? JSON.stringify(build.blueprintDraft) : null,
+    supportFilesJson: JSON.stringify(build.supportFiles),
+    canonicalFilesJson: JSON.stringify(build.canonicalFiles),
+    learnerFilesJson: JSON.stringify(build.learnerFiles),
+    hiddenTestsJson: JSON.stringify(build.hiddenTests),
+    createdAt: new Date(build.createdAt),
+    updatedAt: new Date(build.updatedAt),
+    completedAt: build.completedAt ? new Date(build.completedAt) : null,
+    lastEventAt: build.lastEventAt ? new Date(build.lastEventAt) : null
+  };
+}
+
+function mapBlueprintBuildUpdateInput(build: BlueprintBuild) {
+  return {
+    sessionId: build.sessionId,
+    userId: build.userId,
+    goal: build.goal,
+    learningStyle: build.learningStyle,
+    detectedLanguage: build.detectedLanguage,
+    detectedDomain: build.detectedDomain,
+    status: build.status,
+    currentStage: build.currentStage,
+    currentStageTitle: build.currentStageTitle,
+    currentStageStatus: build.currentStageStatus,
+    lastError: build.lastError,
+    langSmithProject: build.langSmithProject,
+    traceUrl: build.traceUrl,
+    planningSessionJson: build.planningSession
+      ? JSON.stringify(build.planningSession)
+      : null,
+    answersJson: JSON.stringify(build.answers),
+    planJson: build.plan ? JSON.stringify(build.plan) : null,
+    blueprintJson: build.blueprint ? JSON.stringify(build.blueprint) : null,
+    blueprintDraftJson: build.blueprintDraft ? JSON.stringify(build.blueprintDraft) : null,
+    supportFilesJson: JSON.stringify(build.supportFiles),
+    canonicalFilesJson: JSON.stringify(build.canonicalFiles),
+    learnerFilesJson: JSON.stringify(build.learnerFiles),
+    hiddenTestsJson: JSON.stringify(build.hiddenTests),
+    createdAt: new Date(build.createdAt),
+    updatedAt: new Date(build.updatedAt),
+    completedAt: build.completedAt ? new Date(build.completedAt) : null,
+    lastEventAt: build.lastEventAt ? new Date(build.lastEventAt) : null
+  };
+}
+
+function mapBlueprintBuildStageCreateInput(stage: BlueprintBuildStage) {
+  return {
+    id: stage.id,
+    buildId: stage.buildId,
+    stage: stage.stage,
+    title: stage.title,
+    status: stage.status,
+    detail: stage.detail,
+    inputJson: stage.inputJson === null ? null : JSON.stringify(stage.inputJson),
+    outputJson: stage.outputJson === null ? null : JSON.stringify(stage.outputJson),
+    metadataJson: stage.metadataJson === null ? null : JSON.stringify(stage.metadataJson),
+    traceUrl: stage.traceUrl,
+    startedAt: new Date(stage.startedAt),
+    updatedAt: new Date(stage.updatedAt),
+    completedAt: stage.completedAt ? new Date(stage.completedAt) : null
+  };
+}
+
+function mapBlueprintBuildStageUpdateInput(stage: BlueprintBuildStage) {
+  return {
+    title: stage.title,
+    status: stage.status,
+    detail: stage.detail,
+    inputJson: stage.inputJson === null ? null : JSON.stringify(stage.inputJson),
+    outputJson: stage.outputJson === null ? null : JSON.stringify(stage.outputJson),
+    metadataJson: stage.metadataJson === null ? null : JSON.stringify(stage.metadataJson),
+    traceUrl: stage.traceUrl,
+    startedAt: new Date(stage.startedAt),
+    updatedAt: new Date(stage.updatedAt),
+    completedAt: stage.completedAt ? new Date(stage.completedAt) : null
+  };
+}
+
+function mapBlueprintBuildEventCreateInput(event: BlueprintBuildEventRecord) {
+  return {
+    id: event.id,
+    buildId: event.buildId,
+    jobId: event.jobId,
+    kind: event.kind,
+    stage: event.stage,
+    title: event.title,
+    detail: event.detail,
+    level: event.level,
+    payloadJson: event.payload === null ? null : JSON.stringify(event.payload),
+    traceUrl: event.traceUrl,
+    timestamp: new Date(event.timestamp)
+  };
+}
+
+function toBlueprintBuildFromPrisma(build: {
+  id: string;
+  sessionId: string | null;
+  userId: string;
+  goal: string;
+  learningStyle: string | null;
+  detectedLanguage: string | null;
+  detectedDomain: string | null;
+  status: string;
+  currentStage: string | null;
+  currentStageTitle: string | null;
+  currentStageStatus: string | null;
+  lastError: string | null;
+  langSmithProject: string | null;
+  traceUrl: string | null;
+  planningSessionJson: string | null;
+  answersJson: string;
+  planJson: string | null;
+  blueprintJson: string | null;
+  blueprintDraftJson: string | null;
+  supportFilesJson: string;
+  canonicalFilesJson: string;
+  learnerFilesJson: string;
+  hiddenTestsJson: string;
+  createdAt: Date;
+  updatedAt: Date;
+  completedAt: Date | null;
+  lastEventAt: Date | null;
+}): BlueprintBuild {
+  return BlueprintBuildSchema.parse({
+    id: build.id,
+    sessionId: build.sessionId,
+    userId: build.userId,
+    goal: build.goal,
+    learningStyle: build.learningStyle,
+    detectedLanguage: build.detectedLanguage,
+    detectedDomain: build.detectedDomain,
+    status: build.status,
+    currentStage: build.currentStage,
+    currentStageTitle: build.currentStageTitle,
+    currentStageStatus: build.currentStageStatus,
+    lastError: build.lastError,
+    langSmithProject: build.langSmithProject,
+    traceUrl: build.traceUrl,
+    planningSession: parseJsonValue(build.planningSessionJson),
+    answers: parseJsonValue(build.answersJson, []),
+    plan: parseJsonValue(build.planJson),
+    blueprint: parseJsonValue(build.blueprintJson),
+    blueprintDraft: parseJsonValue(build.blueprintDraftJson),
+    supportFiles: parseJsonValue(build.supportFilesJson, []),
+    canonicalFiles: parseJsonValue(build.canonicalFilesJson, []),
+    learnerFiles: parseJsonValue(build.learnerFilesJson, []),
+    hiddenTests: parseJsonValue(build.hiddenTestsJson, []),
+    createdAt: build.createdAt.toISOString(),
+    updatedAt: build.updatedAt.toISOString(),
+    completedAt: build.completedAt?.toISOString() ?? null,
+    lastEventAt: build.lastEventAt?.toISOString() ?? null
+  });
+}
+
+function toBlueprintBuildStageFromPrisma(stage: {
+  id: string;
+  buildId: string;
+  stage: string;
+  title: string;
+  status: string;
+  detail: string | null;
+  inputJson: string | null;
+  outputJson: string | null;
+  metadataJson: string | null;
+  traceUrl: string | null;
+  startedAt: Date;
+  updatedAt: Date;
+  completedAt: Date | null;
+}): BlueprintBuildStage {
+  return BlueprintBuildStageSchema.parse({
+    id: stage.id,
+    buildId: stage.buildId,
+    stage: stage.stage,
+    title: stage.title,
+    status: stage.status,
+    detail: stage.detail,
+    inputJson: parseJsonValue(stage.inputJson),
+    outputJson: parseJsonValue(stage.outputJson),
+    metadataJson: parseJsonValue(stage.metadataJson),
+    traceUrl: stage.traceUrl,
+    startedAt: stage.startedAt.toISOString(),
+    updatedAt: stage.updatedAt.toISOString(),
+    completedAt: stage.completedAt?.toISOString() ?? null
+  });
+}
+
+function toBlueprintBuildEventFromPrisma(event: {
+  id: string;
+  buildId: string;
+  jobId: string | null;
+  kind: string | null;
+  stage: string;
+  title: string;
+  detail: string | null;
+  level: string;
+  payloadJson: string | null;
+  traceUrl: string | null;
+  timestamp: Date;
+}): BlueprintBuildEventRecord {
+  return BlueprintBuildEventRecordSchema.parse({
+    id: event.id,
+    buildId: event.buildId,
+    jobId: event.jobId,
+    kind: event.kind,
+    stage: event.stage,
+    title: event.title,
+    detail: event.detail,
+    level: event.level,
+    payload: parseJsonValue(event.payloadJson),
+    traceUrl: event.traceUrl,
+    timestamp: event.timestamp.toISOString()
+  });
+}
+
 function parseCompletedStepIdsFromPrisma(value: string): string[] {
   try {
     const parsed = JSON.parse(value);
     return Array.isArray(parsed) ? parsed.filter((entry): entry is string => typeof entry === "string") : [];
   } catch {
     return [];
+  }
+}
+
+function parseJsonValue<T>(value: string | null, fallback: T | null = null): T | null {
+  if (!value) {
+    return fallback;
+  }
+
+  try {
+    return JSON.parse(value) as T;
+  } catch {
+    return fallback;
   }
 }
 

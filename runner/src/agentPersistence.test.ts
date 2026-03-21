@@ -33,7 +33,8 @@ test("local agent persistence stores planning state, knowledge, generated bluepr
         createdAt: "2026-03-15T00:00:00.000Z",
         questions: []
       },
-      plan: null
+      plan: null,
+      answers: []
     });
 
     await persistence.setKnowledgeBase({
@@ -167,6 +168,89 @@ test("local agent persistence stores planning state, knowledge, generated bluepr
     assert.equal(activeProject?.id, "session-1");
     assert.equal(activeProject?.totalSteps, 1);
     assert.equal(projects.length, 1);
+
+    await persistence.upsertBlueprintBuild({
+      id: "build-1",
+      sessionId: "session-1",
+      userId: "local-user",
+      goal: "build a C compiler in Rust",
+      learningStyle: "concept-first",
+      detectedLanguage: "rust",
+      detectedDomain: "compiler",
+      status: "running",
+      currentStage: "plan-generation",
+      currentStageTitle: "Synthesizing plan",
+      currentStageStatus: "running",
+      lastError: null,
+      langSmithProject: null,
+      traceUrl: null,
+      planningSession: persistedState?.session ?? null,
+      answers: [
+        {
+          questionId: "question.rust",
+          answerType: "option",
+          optionId: "partial"
+        }
+      ],
+      plan: persistedState?.plan ?? null,
+      blueprint: null,
+      blueprintDraft: null,
+      supportFiles: [],
+      canonicalFiles: [],
+      learnerFiles: [],
+      hiddenTests: [],
+      createdAt: "2026-03-15T00:00:00.000Z",
+      updatedAt: "2026-03-15T00:00:01.000Z",
+      completedAt: null,
+      lastEventAt: "2026-03-15T00:00:01.000Z"
+    });
+
+    await persistence.upsertBlueprintBuildStage({
+      id: "build-1:plan-generation",
+      buildId: "build-1",
+      stage: "plan-generation",
+      title: "Synthesizing plan",
+      status: "completed",
+      detail: "Plan complete",
+      inputJson: {
+        goal: "build a C compiler in Rust"
+      },
+      outputJson: {
+        stepCount: 1
+      },
+      metadataJson: null,
+      traceUrl: null,
+      startedAt: "2026-03-15T00:00:00.000Z",
+      updatedAt: "2026-03-15T00:00:02.000Z",
+      completedAt: "2026-03-15T00:00:02.000Z"
+    });
+
+    await persistence.appendBlueprintBuildEvent({
+      id: "event-1",
+      buildId: "build-1",
+      jobId: "job-1",
+      kind: "planning-plan",
+      stage: "plan-generation",
+      title: "Plan complete",
+      detail: "Created the roadmap",
+      level: "success",
+      payload: {
+        stepCount: 1
+      },
+      traceUrl: null,
+      timestamp: "2026-03-15T00:00:02.000Z"
+    });
+
+    const blueprintBuild = await persistence.getBlueprintBuild("build-1");
+    const blueprintBuildBySession = await persistence.getBlueprintBuildBySession("session-1");
+    const blueprintBuilds = await persistence.listBlueprintBuilds();
+    const blueprintBuildDetail = await persistence.getBlueprintBuildDetail("build-1");
+
+    assert.equal(blueprintBuild?.currentStage, "plan-generation");
+    assert.equal(blueprintBuildBySession?.id, "build-1");
+    assert.equal(blueprintBuilds.length, 1);
+    assert.equal(blueprintBuildDetail.stages.length, 1);
+    assert.equal(blueprintBuildDetail.events.length, 1);
 
     await persistence.updateProjectProgress({
       blueprintPath: path.join(root, ".construct", "generated-blueprints", "session-1", "project-blueprint.json"),

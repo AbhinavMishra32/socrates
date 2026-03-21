@@ -14,6 +14,10 @@ export type RunnerHealth = {
   status: string;
   service: string;
   port: number;
+  debugMode: boolean;
+  debugBlueprintsPath: string | null;
+  langSmithEnabled: boolean;
+  langSmithProject: string | null;
 };
 
 export type WorkspaceFileEntry = {
@@ -420,6 +424,125 @@ export type PlanningSessionCompleteResponse = {
 export type CurrentPlanningSessionResponse = {
   session: PlanningSession | null;
   plan: GeneratedProjectPlan | null;
+  answers: PlanningAnswer[];
+};
+
+export type BlueprintBuildStatus =
+  | "queued"
+  | "questions-ready"
+  | "running"
+  | "failed"
+  | "completed";
+
+export type BlueprintBuildStageStatus =
+  | "pending"
+  | "running"
+  | "completed"
+  | "warning"
+  | "failed";
+
+export type BlueprintBuildArtifactGroup =
+  | "support"
+  | "canonical"
+  | "learner"
+  | "hidden-tests";
+
+export type BlueprintBuildArtifactFile = {
+  path: string;
+  content: string;
+  group: BlueprintBuildArtifactGroup;
+};
+
+export type BlueprintBuildStage = {
+  id: string;
+  buildId: string;
+  stage: string;
+  title: string;
+  status: BlueprintBuildStageStatus;
+  detail: string | null;
+  inputJson: unknown | null;
+  outputJson: unknown | null;
+  metadataJson: unknown | null;
+  traceUrl: string | null;
+  startedAt: string;
+  updatedAt: string;
+  completedAt: string | null;
+};
+
+export type BlueprintBuildEventRecord = {
+  id: string;
+  buildId: string;
+  jobId: string | null;
+  kind: "planning-questions" | "planning-plan" | "runtime-guide" | "blueprint-deep-dive" | null;
+  stage: string;
+  title: string;
+  detail: string | null;
+  level: "info" | "success" | "warning" | "error";
+  payload: unknown | null;
+  traceUrl: string | null;
+  timestamp: string;
+};
+
+export type BlueprintBuild = {
+  id: string;
+  sessionId: string | null;
+  userId: string;
+  goal: string;
+  learningStyle: LearningStyle | null;
+  detectedLanguage: string | null;
+  detectedDomain: string | null;
+  status: BlueprintBuildStatus;
+  currentStage: string | null;
+  currentStageTitle: string | null;
+  currentStageStatus: BlueprintBuildStageStatus | null;
+  lastError: string | null;
+  langSmithProject: string | null;
+  traceUrl: string | null;
+  planningSession: PlanningSession | null;
+  answers: PlanningAnswer[];
+  plan: GeneratedProjectPlan | null;
+  blueprint: ProjectBlueprint | null;
+  blueprintDraft: unknown | null;
+  supportFiles: BlueprintBuildArtifactFile[];
+  canonicalFiles: BlueprintBuildArtifactFile[];
+  learnerFiles: BlueprintBuildArtifactFile[];
+  hiddenTests: BlueprintBuildArtifactFile[];
+  createdAt: string;
+  updatedAt: string;
+  completedAt: string | null;
+  lastEventAt: string | null;
+};
+
+export type BlueprintBuildSummary = Pick<
+  BlueprintBuild,
+  | "id"
+  | "sessionId"
+  | "userId"
+  | "goal"
+  | "learningStyle"
+  | "detectedLanguage"
+  | "detectedDomain"
+  | "status"
+  | "currentStage"
+  | "currentStageTitle"
+  | "currentStageStatus"
+  | "lastError"
+  | "langSmithProject"
+  | "traceUrl"
+  | "createdAt"
+  | "updatedAt"
+  | "completedAt"
+  | "lastEventAt"
+>;
+
+export type BlueprintBuildListResponse = {
+  builds: BlueprintBuildSummary[];
+};
+
+export type BlueprintBuildDetailResponse = {
+  build: BlueprintBuild | null;
+  stages: BlueprintBuildStage[];
+  events: BlueprintBuildEventRecord[];
 };
 
 export type AgentJobCreatedResponse = {

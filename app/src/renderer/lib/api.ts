@@ -2,6 +2,10 @@ import type {
   AgentEvent,
   BlueprintDeepDiveRequest,
   BlueprintDeepDiveResponse,
+  BlueprintBuildDetailResponse,
+  BlueprintBuildEventRecord,
+  BlueprintBuildListResponse,
+  BlueprintBuildStage,
   AgentJobCreatedResponse,
   AgentJobSnapshot,
   BlueprintEnvelope,
@@ -67,6 +71,85 @@ export async function fetchCurrentPlanningState(
   signal?: AbortSignal
 ): Promise<CurrentPlanningSessionResponse> {
   return getJson<CurrentPlanningSessionResponse>("/agent/planning/current", { signal });
+}
+
+export async function fetchBlueprintBuilds(
+  signal?: AbortSignal
+): Promise<BlueprintBuildListResponse> {
+  return getJson<BlueprintBuildListResponse>("/debug/blueprints", { signal });
+}
+
+export async function fetchBlueprintBuildDetail(
+  buildId: string,
+  signal?: AbortSignal
+): Promise<BlueprintBuildDetailResponse> {
+  return getJson<BlueprintBuildDetailResponse>(`/debug/blueprints/${encodeURIComponent(buildId)}`, {
+    signal
+  });
+}
+
+export function openBlueprintBuildStream(
+  buildId: string,
+  input: {
+    onDetail: (detail: BlueprintBuildDetailResponse) => void;
+    onStage: (stage: BlueprintBuildStage) => void;
+    onEvent: (event: BlueprintBuildEventRecord) => void;
+    onState?: (detail: BlueprintBuildDetailResponse["build"]) => void;
+    onError?: (error: Error) => void;
+  }
+): () => void {
+  const stream = new EventSource(
+    `${RUNNER_BASE_URL}/debug/blueprints/${encodeURIComponent(buildId)}/stream`
+  );
+  let closed = false;
+
+  stream.addEventListener("build-detail", (event) => {
+    try {
+      input.onDetail(JSON.parse(event.data) as BlueprintBuildDetailResponse);
+    } catch (error) {
+      input.onError?.(error instanceof Error ? error : new Error(String(error)));
+    }
+  });
+
+  stream.addEventListener("build-stage", (event) => {
+    try {
+      input.onStage(JSON.parse(event.data) as BlueprintBuildStage);
+    } catch (error) {
+      input.onError?.(error instanceof Error ? error : new Error(String(error)));
+    }
+  });
+
+  stream.addEventListener("build-event", (event) => {
+    try {
+      input.onEvent(JSON.parse(event.data) as BlueprintBuildEventRecord);
+    } catch (error) {
+      input.onError?.(error instanceof Error ? error : new Error(String(error)));
+    }
+  });
+
+  stream.addEventListener("build-state", (event) => {
+    try {
+      input.onState?.(JSON.parse(event.data) as BlueprintBuildDetailResponse["build"]);
+    } catch (error) {
+      input.onError?.(error instanceof Error ? error : new Error(String(error)));
+    }
+  });
+
+  stream.addEventListener("build-end", () => {
+    closed = true;
+    stream.close();
+  });
+
+  stream.addEventListener("error", () => {
+    if (!closed) {
+      input.onError?.(new Error(`Lost blueprint build stream for ${buildId}.`));
+    }
+  });
+
+  return () => {
+    closed = true;
+    stream.close();
+  };
 }
 
 export async function startPlanningSession(input: {

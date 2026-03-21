@@ -5041,3 +5041,307 @@ textarea {
     font-family: var(--font-sans);
   }
 }
+
+.construct-debug-shell {
+  min-height: 100vh;
+  background:
+    radial-gradient(circle at top left, color-mix(in srgb, var(--accent) 18%, transparent), transparent 42%),
+    linear-gradient(180deg, color-mix(in srgb, var(--card) 92%, transparent), var(--background));
+  color: var(--foreground);
+  padding: 32px;
+}
+
+.construct-debug-header,
+.construct-debug-section-header,
+.construct-debug-sidebar-header,
+.construct-debug-build-card-header,
+.construct-debug-plan-step-header,
+.construct-debug-stage-card summary,
+.construct-debug-event-card summary,
+.construct-debug-file-card summary {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.construct-debug-header {
+  margin-bottom: 24px;
+}
+
+.construct-debug-header h1,
+.construct-debug-section-header h2,
+.construct-debug-empty h1,
+.construct-debug-empty h2 {
+  margin: 0;
+}
+
+.construct-debug-kicker,
+.construct-debug-section-kicker {
+  display: inline-block;
+  margin-bottom: 6px;
+  font-size: 0.72rem;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--muted-foreground);
+}
+
+.construct-debug-header-actions {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.construct-debug-pill,
+.construct-debug-status,
+.construct-debug-token,
+.construct-debug-tab {
+  border-radius: 999px;
+  border: 1px solid color-mix(in srgb, var(--border) 84%, transparent);
+  background: color-mix(in srgb, var(--card) 88%, transparent);
+  padding: 6px 10px;
+  font-size: 0.78rem;
+}
+
+.construct-debug-pill.is-active {
+  border-color: color-mix(in srgb, var(--accent) 52%, transparent);
+}
+
+.construct-debug-back {
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: var(--card);
+  color: inherit;
+  padding: 10px 16px;
+}
+
+.construct-debug-layout {
+  display: grid;
+  grid-template-columns: minmax(280px, 360px) minmax(0, 1fr);
+  gap: 20px;
+}
+
+.construct-debug-sidebar,
+.construct-debug-section,
+.construct-debug-summary-card,
+.construct-debug-empty,
+.construct-debug-error {
+  border: 1px solid color-mix(in srgb, var(--border) 88%, transparent);
+  background: color-mix(in srgb, var(--card) 94%, transparent);
+  border-radius: 24px;
+  box-shadow: 0 20px 50px color-mix(in srgb, black 12%, transparent);
+}
+
+.construct-debug-sidebar,
+.construct-debug-empty,
+.construct-debug-error {
+  padding: 18px;
+}
+
+.construct-debug-main {
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+}
+
+.construct-debug-build-list,
+.construct-debug-plan-list,
+.construct-debug-stage-list,
+.construct-debug-event-list,
+.construct-debug-artifact-list {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.construct-debug-build-card {
+  width: 100%;
+  border: 1px solid color-mix(in srgb, var(--border) 88%, transparent);
+  border-radius: 18px;
+  background: color-mix(in srgb, var(--muted) 58%, transparent);
+  color: inherit;
+  padding: 14px;
+  text-align: left;
+}
+
+.construct-debug-build-card.is-selected {
+  border-color: color-mix(in srgb, var(--accent) 54%, transparent);
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--accent) 18%, transparent);
+}
+
+.construct-debug-build-card p,
+.construct-debug-plan-step p,
+.construct-debug-stage-card p,
+.construct-debug-event-card p {
+  margin: 8px 0 0;
+  color: var(--muted-foreground);
+}
+
+.construct-debug-build-card-meta,
+.construct-debug-stage-metadata,
+.construct-debug-section-meta,
+.construct-debug-token-row,
+.construct-debug-tab-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.construct-debug-build-card-meta,
+.construct-debug-stage-metadata,
+.construct-debug-section-meta {
+  margin-top: 10px;
+  font-size: 0.8rem;
+  color: var(--muted-foreground);
+}
+
+.construct-debug-summary-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 14px;
+}
+
+.construct-debug-summary-card {
+  padding: 16px;
+}
+
+.construct-debug-summary-card span {
+  display: block;
+  margin-bottom: 6px;
+  font-size: 0.76rem;
+  color: var(--muted-foreground);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+
+.construct-debug-section {
+  padding: 18px;
+}
+
+.construct-debug-inline-error,
+.construct-debug-inline-note,
+.construct-debug-error {
+  border-radius: 18px;
+  padding: 12px 14px;
+}
+
+.construct-debug-inline-error,
+.construct-debug-error {
+  background: color-mix(in srgb, #c73535 11%, var(--card));
+  color: color-mix(in srgb, #c73535 88%, var(--foreground));
+}
+
+.construct-debug-inline-note {
+  background: color-mix(in srgb, var(--accent) 10%, var(--card));
+}
+
+.construct-debug-status.is-completed,
+.construct-debug-status.is-success {
+  border-color: color-mix(in srgb, #2e8b57 38%, transparent);
+  color: #2e8b57;
+}
+
+.construct-debug-status.is-running,
+.construct-debug-status.is-info,
+.construct-debug-status.is-questions-ready,
+.construct-debug-status.is-queued {
+  border-color: color-mix(in srgb, var(--accent) 38%, transparent);
+  color: color-mix(in srgb, var(--accent-foreground) 72%, var(--foreground));
+}
+
+.construct-debug-status.is-warning {
+  border-color: color-mix(in srgb, #c98021 36%, transparent);
+  color: #c98021;
+}
+
+.construct-debug-status.is-failed,
+.construct-debug-status.is-error {
+  border-color: color-mix(in srgb, #c73535 36%, transparent);
+  color: #c73535;
+}
+
+.construct-debug-stage-card,
+.construct-debug-event-card,
+.construct-debug-file-card,
+.construct-debug-plan-step {
+  border: 1px solid color-mix(in srgb, var(--border) 88%, transparent);
+  border-radius: 18px;
+  background: color-mix(in srgb, var(--muted) 48%, transparent);
+  padding: 14px;
+}
+
+.construct-debug-stage-card summary,
+.construct-debug-event-card summary,
+.construct-debug-file-card summary {
+  cursor: pointer;
+  list-style: none;
+}
+
+.construct-debug-stage-card summary::-webkit-details-marker,
+.construct-debug-event-card summary::-webkit-details-marker,
+.construct-debug-file-card summary::-webkit-details-marker {
+  display: none;
+}
+
+.construct-debug-stage-columns {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+  margin-top: 12px;
+}
+
+.construct-debug-json-card {
+  border-radius: 18px;
+  border: 1px solid color-mix(in srgb, var(--border) 84%, transparent);
+  background: color-mix(in srgb, var(--muted) 42%, transparent);
+  padding: 14px;
+}
+
+.construct-debug-json-card h3 {
+  margin: 0 0 10px;
+  font-size: 0.9rem;
+}
+
+.construct-debug-json-card pre,
+.construct-debug-file-card pre {
+  margin: 0;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-size: 0.8rem;
+  line-height: 1.5;
+}
+
+.construct-debug-tab-row {
+  margin-bottom: 14px;
+}
+
+.construct-debug-tab {
+  color: inherit;
+}
+
+.construct-debug-tab.is-selected {
+  border-color: color-mix(in srgb, var(--accent) 40%, transparent);
+  background: color-mix(in srgb, var(--accent) 14%, var(--card));
+}
+
+.construct-debug-sidebar-empty {
+  color: var(--muted-foreground);
+  font-size: 0.9rem;
+}
+
+@media (max-width: 1100px) {
+  .construct-debug-layout,
+  .construct-debug-summary-grid,
+  .construct-debug-stage-columns {
+    grid-template-columns: 1fr;
+  }
+
+  .construct-debug-shell {
+    padding: 20px;
+  }
+
+  .construct-debug-header {
+    flex-direction: column;
+  }
+}

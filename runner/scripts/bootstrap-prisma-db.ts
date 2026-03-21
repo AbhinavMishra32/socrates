@@ -101,6 +101,98 @@ await sql`
   ON construct_blueprints (user_id, last_opened_at DESC)
 `;
 
+await sql`
+  CREATE TABLE IF NOT EXISTS construct_blueprint_builds (
+    id TEXT PRIMARY KEY,
+    session_id TEXT UNIQUE,
+    user_id TEXT NOT NULL DEFAULT 'local-user',
+    goal TEXT NOT NULL,
+    learning_style TEXT,
+    detected_language TEXT,
+    detected_domain TEXT,
+    status TEXT NOT NULL,
+    current_stage TEXT,
+    current_stage_title TEXT,
+    current_stage_status TEXT,
+    last_error TEXT,
+    langsmith_project TEXT,
+    trace_url TEXT,
+    planning_session_json TEXT,
+    answers_json TEXT NOT NULL DEFAULT '[]',
+    plan_json TEXT,
+    blueprint_json TEXT,
+    blueprint_draft_json TEXT,
+    support_files_json TEXT NOT NULL DEFAULT '[]',
+    canonical_files_json TEXT NOT NULL DEFAULT '[]',
+    learner_files_json TEXT NOT NULL DEFAULT '[]',
+    hidden_tests_json TEXT NOT NULL DEFAULT '[]',
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    completed_at TIMESTAMPTZ,
+    last_event_at TIMESTAMPTZ
+  )
+`;
+
+await sql`
+  CREATE TABLE IF NOT EXISTS construct_blueprint_build_stages (
+    id TEXT PRIMARY KEY,
+    build_id TEXT NOT NULL REFERENCES construct_blueprint_builds(id) ON DELETE CASCADE,
+    stage TEXT NOT NULL,
+    title TEXT NOT NULL,
+    status TEXT NOT NULL,
+    detail TEXT,
+    input_json TEXT,
+    output_json TEXT,
+    metadata_json TEXT,
+    trace_url TEXT,
+    started_at TIMESTAMPTZ NOT NULL,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    completed_at TIMESTAMPTZ,
+    UNIQUE (build_id, stage)
+  )
+`;
+
+await sql`
+  CREATE TABLE IF NOT EXISTS construct_blueprint_build_events (
+    id TEXT PRIMARY KEY,
+    build_id TEXT NOT NULL REFERENCES construct_blueprint_builds(id) ON DELETE CASCADE,
+    job_id TEXT,
+    kind TEXT,
+    stage TEXT NOT NULL,
+    title TEXT NOT NULL,
+    detail TEXT,
+    level TEXT NOT NULL,
+    payload_json TEXT,
+    trace_url TEXT,
+    timestamp TIMESTAMPTZ NOT NULL
+  )
+`;
+
+await sql`
+  CREATE INDEX IF NOT EXISTS construct_blueprint_builds_user_updated_idx
+  ON construct_blueprint_builds (user_id, updated_at DESC)
+`;
+
+await sql`
+  CREATE INDEX IF NOT EXISTS construct_blueprint_builds_user_status_idx
+  ON construct_blueprint_builds (user_id, status)
+`;
+
+await sql`
+  CREATE INDEX IF NOT EXISTS construct_blueprint_builds_user_last_event_idx
+  ON construct_blueprint_builds (user_id, last_event_at DESC)
+`;
+
+await sql`
+  CREATE INDEX IF NOT EXISTS construct_blueprint_build_stages_build_updated_idx
+  ON construct_blueprint_build_stages (build_id, updated_at DESC)
+`;
+
+await sql`
+  CREATE INDEX IF NOT EXISTS construct_blueprint_build_events_build_timestamp_idx
+  ON construct_blueprint_build_events (build_id, timestamp DESC)
+`;
+
 console.log("Construct Prisma backend schema bootstrapped.");
 
 function loadEnv(rootDirectory: string): void {

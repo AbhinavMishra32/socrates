@@ -108,6 +108,7 @@ import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip
 import { Badge } from "@/components/ui/badge";
 import { cn } from "@/lib/utils";
 
+import { BlueprintDebugView } from "./components/blueprint-debug-view";
 import { findAnchorLocation } from "./lib/anchors";
 import {
   buildGuidancePrompts,
@@ -178,6 +179,14 @@ declare global {
 type SurfaceMode = "brief" | "focus";
 type ThemeMode = "light" | "dark";
 type TaskRunState = "idle" | "running";
+type AppRoute =
+  | {
+      kind: "workspace";
+    }
+  | {
+      kind: "debug-blueprints";
+      buildId: string | null;
+    };
 type PlanningAnswerDraft =
   | {
       answerType: "option";
@@ -191,6 +200,28 @@ type PlanningAnswerDraft =
 const runtimeInfo = window.construct.getRuntimeInfo();
 const SAVE_DEBOUNCE_MS = 450;
 
+function parseAppRoute(hash: string): AppRoute {
+  const normalized = hash.replace(/^#/, "");
+
+  if (!normalized.startsWith("/debug/blueprints")) {
+    return {
+      kind: "workspace"
+    };
+  }
+
+  const parts = normalized.split("/").filter(Boolean);
+  const buildId = parts[2] ? decodeURIComponent(parts[2]) : null;
+
+  return {
+    kind: "debug-blueprints",
+    buildId
+  };
+}
+
+function formatBlueprintDebugRoute(buildId: string | null = null): string {
+  return buildId ? `#/debug/blueprints/${encodeURIComponent(buildId)}` : "#/debug/blueprints";
+}
+
 function hasPlanningAnswer(answer: PlanningAnswerDraft | undefined): answer is PlanningAnswerDraft {
   if (!answer) {
     return false;
@@ -199,6 +230,24 @@ function hasPlanningAnswer(answer: PlanningAnswerDraft | undefined): answer is P
   return answer.answerType === "option"
     ? Boolean(answer.optionId)
     : answer.customResponse.trim().length > 0;
+}
+
+function toPlanningAnswerDrafts(
+  answers: PlanningAnswer[]
+): Record<string, PlanningAnswerDraft> {
+  return answers.reduce<Record<string, PlanningAnswerDraft>>((accumulator, answer) => {
+    accumulator[answer.questionId] =
+      answer.answerType === "custom"
+        ? {
+            answerType: "custom",
+            customResponse: answer.customResponse
+          }
+        : {
+            answerType: "option",
+            optionId: answer.optionId
+          };
+    return accumulator;
+  }, {});
 }
 
 function PrimaryButton({
@@ -368,6 +417,9 @@ function DetailPopover({
 }
 
 export default function App() {
+  const [appRoute, setAppRoute] = useState<AppRoute>(() =>
+    parseAppRoute(window.location.hash)
+  );
   const [runnerHealth, setRunnerHealth] = useState<RunnerHealth | null>(null);
   const [projectsDashboard, setProjectsDashboard] =
     useState<ProjectsDashboardResponse | null>(null);
@@ -496,6 +548,13 @@ export default function App() {
       hasPlanningAnswer(planningAnswers[question.id])
     );
   }, [planningAnswers, planningSession]);
+  const canResumePlanningGeneration = useMemo(() => {
+    if (!planningSession || !planningPlan || !canCompletePlanning) {
+      return false;
+    }
+
+    return !projectsDashboard?.projects.some((project) => project.id === planningSession.sessionId);
+  }, [canCompletePlanning, planningPlan, planningSession, projectsDashboard]);
   const activeTaskResult =
     activeStep && taskResult?.stepId === activeStep.id ? taskResult : null;
   const activeTaskProgress =
@@ -529,6 +588,17 @@ export default function App() {
   }, [theme]);
 
   useEffect(() => {
+    const syncRoute = () => {
+      setAppRoute(parseAppRoute(window.location.hash));
+    };
+
+    window.addEventListener("hashchange", syncRoute);
+    return () => {
+      window.removeEventListener("hashchange", syncRoute);
+    };
+  }, []);
+
+  useEffect(() => {
     const controller = new AbortController();
 
     const loadDashboard = async () => {
@@ -545,7 +615,7 @@ export default function App() {
         setLearnerProfile(profile);
         setPlanningSession(planningState.session);
         setPlanningPlan(planningState.plan);
-        setPlanningAnswers({});
+        setPlanningAnswers(toPlanningAnswerDrafts(planningState.answers));
         setPlanningEvents([]);
         setPlanningError("");
         setPlanningGoal("");
@@ -1302,6 +1372,25 @@ export default function App() {
     setPlanningOverlayOpen(true);
   };
 
+  if (appRoute.kind === "debug-blueprints") {
+    return (
+      <main className="construct-app">
+        <BlueprintDebugView
+          debugMode={runnerHealth?.debugMode ?? false}
+          langSmithEnabled={runnerHealth?.langSmithEnabled ?? false}
+          langSmithProject={runnerHealth?.langSmithProject ?? null}
+          initialBuildId={appRoute.buildId}
+          onClose={() => {
+            window.location.hash = "";
+          }}
+          onNavigateToBuild={(buildId) => {
+            window.location.hash = formatBlueprintDebugRoute(buildId);
+          }}
+        />
+      </main>
+    );
+  }
+
   const currentView: "projects" | "lesson" | "code" =
     dashboardOpen
       ? "projects"
@@ -1779,6 +1868,7 @@ export default function App() {
               void handleCompletePlanning();
             }}
             canCompletePlanning={canCompletePlanning}
+            canResumePlanningGeneration={canResumePlanningGeneration}
           />
         ) : null}
 
@@ -2543,6 +2633,16 @@ function ProjectsHome({
               <strong>{completedProjects}</strong>
             </div>
           </div>
+          {runnerHealth?.debugMode ? (
+            <SecondaryButton
+              type="button"
+              onClick={() => {
+                window.location.hash = formatBlueprintDebugRoute();
+              }}
+            >
+              Blueprint debug
+            </SecondaryButton>
+          ) : null}
         </div>
       </header>
 
@@ -2911,7 +3011,8 @@ function PlanningOverlay({
   onCustomAnswerChange,
   onStartPlanning,
   onCompletePlanning,
-  canCompletePlanning
+  canCompletePlanning,
+  canResumePlanningGeneration
 }: {
   planningBusy: boolean;
   planningEvents: AgentEvent[];
@@ -2929,6 +3030,7 @@ function PlanningOverlay({
   onStartPlanning: () => void;
   onCompletePlanning: () => void;
   canCompletePlanning: boolean;
+  canResumePlanningGeneration: boolean;
 }) {
   const isQuestionPhase = planningSession && !planningPlan;
   const answeredQuestionCount = planningSession
@@ -3394,9 +3496,22 @@ function PlanningOverlay({
 
         <footer className="construct-planning-footer">
           {planningPlan ? (
-            <PrimaryButton type="button" onClick={onClose}>
-              Continue to workspace
-            </PrimaryButton>
+            canResumePlanningGeneration ? (
+              <PrimaryButton type="button" onClick={onCompletePlanning} disabled={planningBusy}>
+                {planningBusy ? (
+                  <>
+                    <Spinner data-icon="inline-start" />
+                    Resuming generation...
+                  </>
+                ) : (
+                  "Resume generation"
+                )}
+              </PrimaryButton>
+            ) : (
+              <PrimaryButton type="button" onClick={onClose}>
+                Continue to workspace
+              </PrimaryButton>
+            )
           ) : null}
         </footer>
       </DialogContent>

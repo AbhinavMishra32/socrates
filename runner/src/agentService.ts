@@ -39,6 +39,10 @@ import {
   type AgentJobKind,
   type AgentJobSnapshot,
   type ArchitectureComponent,
+  type BlueprintBuild,
+  type BlueprintBuildDetailResponse,
+  type BlueprintBuildStage,
+  type BlueprintBuildSummary,
   type CheckReviewRequest,
   type CheckReviewResponse,
   type BlueprintDeepDiveRequest,
@@ -93,9 +97,11 @@ import { zodToJsonSchema } from "zod-to-json-schema";
 type PlanningStateFile = {
   session: PlanningSession | null;
   plan: GeneratedProjectPlan | null;
+  answers: PlanningSessionCompleteRequest["answers"];
 };
 
 type JobListener = (eventName: string, payload: unknown) => void;
+type BuildListener = (eventName: string, payload: unknown) => void;
 
 type AgentJobRecord = {
   jobId: string;
@@ -505,6 +511,10 @@ export class ConstructAgentService {
   private search: SearchProvider | null = null;
   private projectInstaller: ProjectInstaller | null = null;
   private readonly jobs = new Map<string, AgentJobRecord>();
+  private readonly blueprintBuildListeners = new Map<string, Set<BuildListener>>();
+  private readonly buildIdsByJobId = new Map<string, string>();
+  private readonly buildStageStartedAt = new Map<string, string>();
+  private blueprintBuildWriteQueue: Promise<void> = Promise.resolve();
 
   constructor(
     rootDirectory: string,
@@ -537,6 +547,14 @@ export class ConstructAgentService {
   async getCurrentPlanningState(): Promise<PlanningStateFile> {
     const state = await this.readPlanningState();
     return CurrentPlanningSessionResponseSchema.parse(state);
+  }
+
+  async listBlueprintBuilds(): Promise<BlueprintBuildSummary[]> {
+    return this.persistence.listBlueprintBuilds();
+  }
+
+  async getBlueprintBuildDetail(buildId: string): Promise<BlueprintBuildDetailResponse> {
+    return this.persistence.getBlueprintBuildDetail(buildId);
   }
 
   async getLearnerProfile(
@@ -1054,6 +1072,400 @@ export class ConstructAgentService {
     });
   }
 
+  async openBlueprintBuildStream(
+    buildId: string,
+    response: http.ServerResponse
+  ): Promise<void> {
+    response.writeHead(200, {
+      "Content-Type": "text/event-stream",
+      "Cache-Control": "no-cache, no-transform",
+      Connection: "keep-alive",
+      "X-Accel-Buffering": "no"
+    });
+
+    const send = (eventName: string, payload: unknown) => {
+      response.write(`event: ${eventName}\n`);
+      response.write(`data: ${JSON.stringify(payload)}\n\n`);
+
+      if (eventName === "build-end") {
+        response.end();
+      }
+    };
+
+    const detail = await this.getBlueprintBuildDetail(buildId);
+    send("build-detail", detail);
+
+    if (detail.build?.status === "completed" || detail.build?.status === "failed") {
+      send("build-end", {
+        buildId,
+        status: detail.build.status
+      });
+      return;
+    }
+
+    const listeners = this.blueprintBuildListeners.get(buildId) ?? new Set<BuildListener>();
+    listeners.add(send);
+    this.blueprintBuildListeners.set(buildId, listeners);
+
+    response.on("close", () => {
+      listeners.delete(send);
+
+      if (listeners.size === 0) {
+        this.blueprintBuildListeners.delete(buildId);
+      }
+    });
+  }
+
+  private async ensurePlanningQuestionsBuild(
+    jobId: string,
+    request: PlanningSessionStartRequest
+  ): Promise<BlueprintBuild> {
+    const existingBuildId = this.buildIdsByJobId.get(jobId);
+    if (existingBuildId) {
+      const existingBuild = await this.persistence.getBlueprintBuild(existingBuildId);
+      if (existingBuild) {
+        return existingBuild;
+      }
+    }
+
+    const timestamp = this.now().toISOString();
+    const build = createBlueprintBuildRecord({
+      id: randomUUID(),
+      sessionId: null,
+      goal: request.goal.trim(),
+      learningStyle: request.learningStyle,
+      detectedLanguage: null,
+      detectedDomain: null,
+      status: "running",
+      currentStage: "question-generation",
+      currentStageTitle: "Generating tailoring questions",
+      currentStageStatus: "running",
+      createdAt: timestamp,
+      updatedAt: timestamp,
+      planningSession: null,
+      answers: [],
+      langSmithProject: resolveLangSmithProjectName(),
+      traceUrl: null
+    });
+
+    this.buildIdsByJobId.set(jobId, build.id);
+    await this.persistBlueprintBuild(build);
+    return build;
+  }
+
+  private async ensurePlanningPlanBuild(
+    jobId: string,
+    request: PlanningSessionCompleteRequest,
+    session: PlanningSession
+  ): Promise<BlueprintBuild> {
+    const existingBySession = await this.persistence.getBlueprintBuildBySession(session.sessionId);
+    const timestamp = this.now().toISOString();
+    const build = existingBySession ?? createBlueprintBuildRecord({
+      id: session.sessionId,
+      sessionId: session.sessionId,
+      goal: session.goal,
+      learningStyle: session.learningStyle,
+      detectedLanguage: session.detectedLanguage,
+      detectedDomain: session.detectedDomain,
+      status: "running",
+      currentStage: "plan-generation",
+      currentStageTitle: "Synthesizing project plan",
+      currentStageStatus: "running",
+      createdAt: timestamp,
+      updatedAt: timestamp,
+      planningSession: session,
+      answers: request.answers,
+      langSmithProject: resolveLangSmithProjectName(),
+      traceUrl: null
+    });
+
+    this.buildIdsByJobId.set(jobId, build.id);
+
+    const nextBuild = createBlueprintBuildRecord({
+      ...build,
+      sessionId: session.sessionId,
+      goal: session.goal,
+      learningStyle: session.learningStyle,
+      detectedLanguage: session.detectedLanguage,
+      detectedDomain: session.detectedDomain,
+      status: "running",
+      currentStage: build.currentStage ?? "plan-generation",
+      currentStageTitle: build.currentStageTitle ?? "Synthesizing project plan",
+      currentStageStatus: "running",
+      updatedAt: timestamp,
+      completedAt: null,
+      lastError: null,
+      planningSession: session,
+      answers: request.answers,
+      langSmithProject: build.langSmithProject ?? resolveLangSmithProjectName()
+    });
+
+    await this.persistBlueprintBuild(nextBuild);
+    return nextBuild;
+  }
+
+  private async mutateBlueprintBuildForJob(
+    jobId: string,
+    mutate: (current: BlueprintBuild | null) => BlueprintBuild
+  ): Promise<BlueprintBuild | null> {
+    const buildId = this.buildIdsByJobId.get(jobId);
+    if (!buildId) {
+      return null;
+    }
+
+    return this.mutateBlueprintBuild(buildId, mutate);
+  }
+
+  private async mutateBlueprintBuild(
+    buildId: string,
+    mutate: (current: BlueprintBuild | null) => BlueprintBuild
+  ): Promise<BlueprintBuild> {
+    return this.enqueueBlueprintBuildWrite(async () =>
+      this.mutateBlueprintBuildUnsafe(buildId, mutate)
+    );
+  }
+
+  private async mutateBlueprintBuildUnsafe(
+    buildId: string,
+    mutate: (current: BlueprintBuild | null) => BlueprintBuild
+  ): Promise<BlueprintBuild> {
+    const current = await this.persistence.getBlueprintBuild(buildId);
+    const next = createBlueprintBuildRecord(mutate(current));
+    await this.persistBlueprintBuildUnsafe(next);
+    return next;
+  }
+
+  private async persistBlueprintBuild(build: BlueprintBuild): Promise<void> {
+    await this.enqueueBlueprintBuildWrite(async () => {
+      await this.persistBlueprintBuildUnsafe(build);
+    });
+  }
+
+  private async persistBlueprintBuildUnsafe(build: BlueprintBuild): Promise<void> {
+    await this.persistence.upsertBlueprintBuild(build);
+    this.broadcastBlueprintBuild(build.id, "build-state", build);
+
+    if (build.status === "completed" || build.status === "failed") {
+      this.broadcastBlueprintBuild(build.id, "build-end", {
+        buildId: build.id,
+        status: build.status
+      });
+    }
+  }
+
+  private async recordBlueprintBuildEvent(
+    jobId: string,
+    event: AgentEvent
+  ): Promise<void> {
+    const buildId = this.buildIdsByJobId.get(jobId);
+    if (!buildId) {
+      return;
+    }
+
+    await this.enqueueBlueprintBuildWrite(async () => {
+      const record = {
+        id: event.id,
+        buildId,
+        jobId,
+        kind: event.kind,
+        stage: event.stage,
+        title: event.title,
+        detail: event.detail ?? null,
+        level: event.level,
+        payload: cloneJsonCompatible(event.payload ?? null),
+        traceUrl: null,
+        timestamp: event.timestamp
+      } satisfies Parameters<AgentPersistence["appendBlueprintBuildEvent"]>[0];
+
+      await this.persistence.appendBlueprintBuildEvent(record);
+      this.broadcastBlueprintBuild(buildId, "build-event", record);
+
+      const normalizedStage = stripStageStreamSuffix(event.stage);
+      const isStreamEvent = event.stage.endsWith("-stream");
+      await this.mutateBlueprintBuildUnsafe(buildId, (current) => {
+        const existing = current ?? createBlueprintBuildRecord({
+          id: buildId,
+          sessionId: null,
+          goal: event.title,
+          learningStyle: null,
+          detectedLanguage: null,
+          detectedDomain: null,
+          status: "running",
+          currentStage: normalizedStage,
+          currentStageTitle: event.title,
+          currentStageStatus: event.level === "error" ? "failed" : "running",
+          createdAt: event.timestamp,
+          updatedAt: event.timestamp
+        });
+
+        return {
+          ...existing,
+          updatedAt: event.timestamp,
+          lastEventAt: event.timestamp,
+          currentStage: normalizedStage,
+          currentStageTitle: isStreamEvent ? existing.currentStageTitle : event.title,
+          currentStageStatus:
+            event.level === "error"
+              ? "failed"
+              : event.level === "warning"
+                ? "warning"
+                : existing.currentStageStatus,
+          lastError:
+            event.level === "error"
+              ? event.detail ?? event.title
+              : existing.lastError
+        };
+      });
+    });
+  }
+
+  private async markBlueprintBuildStageForJob(
+    jobId: string,
+    input: {
+      stage: string;
+      title: string;
+      status: BlueprintBuildStage["status"];
+      detail: string;
+      inputJson?: unknown;
+      outputJson?: unknown;
+      metadataJson?: unknown;
+    }
+  ): Promise<void> {
+    const buildId = this.buildIdsByJobId.get(jobId);
+    if (!buildId) {
+      return;
+    }
+
+    await this.enqueueBlueprintBuildWrite(async () => {
+      const timestamp = this.now().toISOString();
+      const stageKey = `${buildId}:${input.stage}`;
+      const startedAt = this.buildStageStartedAt.get(stageKey) ?? timestamp;
+
+      if (input.status === "running") {
+        this.buildStageStartedAt.set(stageKey, startedAt);
+      } else if (input.status === "completed" || input.status === "failed") {
+        this.buildStageStartedAt.delete(stageKey);
+      }
+
+      const stageRecord: BlueprintBuildStage = {
+        id: stageKey,
+        buildId,
+        stage: input.stage,
+        title: input.title,
+        status: input.status,
+        detail: input.detail,
+        inputJson: cloneJsonCompatible(input.inputJson ?? null),
+        outputJson: cloneJsonCompatible(input.outputJson ?? null),
+        metadataJson: cloneJsonCompatible(input.metadataJson ?? null),
+        traceUrl: null,
+        startedAt,
+        updatedAt: timestamp,
+        completedAt:
+          input.status === "completed" || input.status === "failed" ? timestamp : null
+      };
+
+      await this.persistence.upsertBlueprintBuildStage(stageRecord);
+      this.broadcastBlueprintBuild(buildId, "build-stage", stageRecord);
+
+      await this.mutateBlueprintBuildUnsafe(buildId, (current) => {
+        const existing = current ?? createBlueprintBuildRecord({
+          id: buildId,
+          sessionId: null,
+          goal: input.title,
+          learningStyle: null,
+          detectedLanguage: null,
+          detectedDomain: null,
+          status: "running",
+          currentStage: input.stage,
+          currentStageTitle: input.title,
+          currentStageStatus: input.status,
+          createdAt: timestamp,
+          updatedAt: timestamp
+        });
+
+        return {
+          ...existing,
+          status:
+            input.status === "failed"
+              ? "failed"
+              : existing.status === "completed"
+                ? "completed"
+                : "running",
+          currentStage: input.stage,
+          currentStageTitle: input.title,
+          currentStageStatus: input.status,
+          updatedAt: timestamp,
+          lastError: input.status === "failed" ? input.detail : existing.lastError
+        };
+      });
+    });
+  }
+
+  private async markBlueprintBuildFailedForJob(
+    jobId: string,
+    errorMessage: string
+  ): Promise<void> {
+    const buildId = this.buildIdsByJobId.get(jobId);
+    if (!buildId) {
+      return;
+    }
+
+    const timestamp = this.now().toISOString();
+    await this.mutateBlueprintBuild(buildId, (current) => {
+      if (!current) {
+        return createBlueprintBuildRecord({
+          id: buildId,
+          sessionId: null,
+          goal: "Project creation",
+          learningStyle: null,
+          detectedLanguage: null,
+          detectedDomain: null,
+          status: "failed",
+          currentStage: "failed",
+          currentStageTitle: "Project creation failed",
+          currentStageStatus: "failed",
+          lastError: errorMessage,
+          createdAt: timestamp,
+          updatedAt: timestamp
+        });
+      }
+
+      return {
+        ...current,
+        status: "failed",
+        currentStage: current.currentStage ?? "failed",
+        currentStageTitle: current.currentStageTitle ?? "Project creation failed",
+        currentStageStatus: "failed",
+        lastError: errorMessage,
+        updatedAt: timestamp
+      };
+    });
+  }
+
+  private broadcastBlueprintBuild(
+    buildId: string,
+    eventName: string,
+    payload: unknown
+  ): void {
+    const listeners = this.blueprintBuildListeners.get(buildId);
+    if (!listeners) {
+      return;
+    }
+
+    for (const listener of listeners) {
+      listener(eventName, payload);
+    }
+  }
+
+  private async enqueueBlueprintBuildWrite<T>(task: () => Promise<T>): Promise<T> {
+    const run = this.blueprintBuildWriteQueue.then(task, task);
+    this.blueprintBuildWriteQueue = run.then(
+      () => undefined,
+      () => undefined
+    );
+    return run;
+  }
+
   private createJob(kind: AgentJobKind): AgentJobRecord {
     const timestamp = this.now().toISOString();
     const record: AgentJobRecord = {
@@ -1113,6 +1525,7 @@ export class ConstructAgentService {
         jobId: job.jobId,
         error: job.error
       });
+      await this.markBlueprintBuildFailedForJob(job.jobId, job.error);
       this.closeListeners(job);
     }
   }
@@ -1162,6 +1575,7 @@ export class ConstructAgentService {
     job.updatedAt = event.timestamp;
     this.logAgentEvent(job, event);
     this.broadcast(job, "agent-event", event);
+    void this.recordBlueprintBuildEvent(job.jobId, event);
   }
 
   private logAgentEvent(job: AgentJobRecord, event: AgentEvent): void {
@@ -1211,6 +1625,8 @@ export class ConstructAgentService {
     jobId: string,
     request: PlanningSessionStartRequest
   ): Promise<PlanningSessionStartResponse> {
+    await this.ensurePlanningQuestionsBuild(jobId, request);
+
     const StateAnnotation = Annotation.Root({
       jobId: Annotation<string>(),
       request: Annotation<PlanningSessionStartRequest>(),
@@ -1321,21 +1737,64 @@ export class ConstructAgentService {
       .addEdge("generateQuestions", END)
       .compile();
 
-    const result = await graph.invoke({
-      jobId,
-      request,
-      knowledgeBase: createEmptyKnowledgeBase(this.now().toISOString()),
-      goalScope: null,
-      projectShapeResearch: null,
-      prerequisiteResearch: null,
-      mergedResearch: null,
-      session: null
-    });
+    const result = await graph.invoke(
+      {
+        jobId,
+        request,
+        knowledgeBase: createEmptyKnowledgeBase(this.now().toISOString()),
+        goalScope: null,
+        projectShapeResearch: null,
+        prerequisiteResearch: null,
+        mergedResearch: null,
+        session: null
+      },
+      {
+        runName: "construct:planning-questions",
+        tags: ["construct", "planning-questions"],
+        metadata: {
+          buildId: this.buildIdsByJobId.get(jobId) ?? null,
+          goal: request.goal,
+          learningStyle: request.learningStyle,
+          langSmithProject: resolveLangSmithProjectName()
+        }
+      }
+    );
 
     await this.writePlanningState({
       session: result.session,
-      plan: null
+      plan: null,
+      answers: []
     });
+
+    await this.mutateBlueprintBuildForJob(jobId, (current) => ({
+      ...(current ??
+        createBlueprintBuildRecord({
+          id: result.session?.sessionId ?? randomUUID(),
+          sessionId: result.session?.sessionId ?? null,
+          goal: request.goal,
+          learningStyle: request.learningStyle,
+          detectedLanguage: result.session?.detectedLanguage ?? null,
+          detectedDomain: result.session?.detectedDomain ?? null,
+          status: "questions-ready",
+          currentStage: "question-generation",
+          currentStageTitle: "Tailoring questions ready",
+          currentStageStatus: "completed",
+          createdAt: this.now().toISOString(),
+          updatedAt: this.now().toISOString()
+        })),
+      sessionId: result.session?.sessionId ?? current?.sessionId ?? null,
+      goal: result.session?.goal ?? request.goal,
+      learningStyle: result.session?.learningStyle ?? request.learningStyle,
+      detectedLanguage: result.session?.detectedLanguage ?? current?.detectedLanguage ?? null,
+      detectedDomain: result.session?.detectedDomain ?? current?.detectedDomain ?? null,
+      status: "questions-ready",
+      currentStage: "question-generation",
+      currentStageTitle: "Tailoring questions ready",
+      currentStageStatus: "completed",
+      planningSession: result.session,
+      updatedAt: this.now().toISOString(),
+      lastError: null
+    }));
 
     return PlanningSessionStartResponseSchema.parse({
       session: result.session
@@ -1359,6 +1818,12 @@ export class ConstructAgentService {
       request.sessionId,
       answersSignature
     );
+    await this.ensurePlanningPlanBuild(jobId, request, session);
+    await this.writePlanningState({
+      session,
+      plan: planningState.plan,
+      answers: request.answers
+    });
 
     const StateAnnotation = Annotation.Root({
       jobId: Annotation<string>(),
@@ -1479,8 +1944,35 @@ export class ConstructAgentService {
             await this.persistPlanningArtifacts(state.session, plan);
             await this.writePlanningState({
               session: state.session,
-              plan
+              plan,
+              answers: request.answers
             });
+            await this.mutateBlueprintBuildForJob(jobId, (current) => ({
+              ...(current ??
+                createBlueprintBuildRecord({
+                  id: state.session.sessionId,
+                  sessionId: state.session.sessionId,
+                  goal: state.session.goal,
+                  learningStyle: state.session.learningStyle,
+                  detectedLanguage: state.session.detectedLanguage,
+                  detectedDomain: state.session.detectedDomain,
+                  status: "running",
+                  currentStage: "plan-generation",
+                  currentStageTitle: "Project plan ready",
+                  currentStageStatus: "completed",
+                  createdAt: this.now().toISOString(),
+                  updatedAt: this.now().toISOString()
+                })),
+              planningSession: state.session,
+              answers: request.answers,
+              plan,
+              status: "running",
+              currentStage: "plan-generation",
+              currentStageTitle: "Project plan ready",
+              currentStageStatus: "completed",
+              updatedAt: this.now().toISOString(),
+              lastError: null
+            }));
             await this.mergeKnowledgeBase(
               state.knowledgeBase,
               state.session,
@@ -1603,6 +2095,37 @@ export class ConstructAgentService {
             plan: state.plan,
             blueprintDraft: bundleDraft
           });
+          await this.mutateBlueprintBuildForJob(jobId, (current) => ({
+            ...(current ??
+              createBlueprintBuildRecord({
+                id: state.session.sessionId,
+                sessionId: state.session.sessionId,
+                goal: state.session.goal,
+                learningStyle: state.session.learningStyle,
+                detectedLanguage: state.session.detectedLanguage,
+                detectedDomain: state.session.detectedDomain,
+                status: "running",
+                currentStage: "blueprint-generation",
+                currentStageTitle: "Project bundle drafted",
+                currentStageStatus: "completed",
+                createdAt: this.now().toISOString(),
+                updatedAt: this.now().toISOString()
+              })),
+            planningSession: state.session,
+            answers: request.answers,
+            plan: state.plan,
+            blueprintDraft: bundleDraft,
+            supportFiles: toBlueprintArtifactFiles(bundleDraft.supportFiles, "support"),
+            canonicalFiles: toBlueprintArtifactFiles(bundleDraft.canonicalFiles, "canonical"),
+            learnerFiles: toBlueprintArtifactFiles(bundleDraft.learnerFiles, "learner"),
+            hiddenTests: toBlueprintArtifactFiles(bundleDraft.hiddenTests, "hidden-tests"),
+            status: "running",
+            currentStage: "blueprint-generation",
+            currentStageTitle: "Project bundle drafted",
+            currentStageStatus: "completed",
+            updatedAt: this.now().toISOString(),
+            lastError: null
+          }));
 
           return bundleDraft;
         }),
@@ -1750,6 +2273,37 @@ export class ConstructAgentService {
             plan: state.plan,
             blueprintDraft: nextBlueprintDraft
           });
+          await this.mutateBlueprintBuildForJob(jobId, (current) => ({
+            ...(current ??
+              createBlueprintBuildRecord({
+                id: state.session.sessionId,
+                sessionId: state.session.sessionId,
+                goal: state.session.goal,
+                learningStyle: state.session.learningStyle,
+                detectedLanguage: state.session.detectedLanguage,
+                detectedDomain: state.session.detectedDomain,
+                status: "running",
+                currentStage: "lesson-authoring",
+                currentStageTitle: "Lesson chapters ready",
+                currentStageStatus: "completed",
+                createdAt: this.now().toISOString(),
+                updatedAt: this.now().toISOString()
+              })),
+            planningSession: state.session,
+            answers: request.answers,
+            plan: state.plan,
+            blueprintDraft: nextBlueprintDraft,
+            supportFiles: toBlueprintArtifactFiles(nextBlueprintDraft.supportFiles, "support"),
+            canonicalFiles: toBlueprintArtifactFiles(nextBlueprintDraft.canonicalFiles, "canonical"),
+            learnerFiles: toBlueprintArtifactFiles(nextBlueprintDraft.learnerFiles, "learner"),
+            hiddenTests: toBlueprintArtifactFiles(nextBlueprintDraft.hiddenTests, "hidden-tests"),
+            status: "running",
+            currentStage: "lesson-authoring",
+            currentStageTitle: "Lesson chapters ready",
+            currentStageStatus: "completed",
+            updatedAt: this.now().toISOString(),
+            lastError: null
+          }));
 
           return nextBlueprintDraft;
         }),
@@ -1794,21 +2348,35 @@ export class ConstructAgentService {
       .addEdge("persistBlueprint", END)
       .compile();
 
-    const result = await graph.invoke({
-      jobId,
-      request,
-      session,
-      knowledgeBase: createEmptyKnowledgeBase(this.now().toISOString()),
-      goalScope: null,
-      architectureResearch: null,
-      dependencyResearch: null,
-      validationResearch: null,
-      mergedResearch: null,
-      plan: planningCheckpoint?.plan ?? null,
-      blueprintDraft: planningCheckpoint?.blueprintDraft ?? null,
-      checkpointStage: planningCheckpoint?.stage ?? null,
-      activeBlueprintPath: null
-    });
+    const result = await graph.invoke(
+      {
+        jobId,
+        request,
+        session,
+        knowledgeBase: createEmptyKnowledgeBase(this.now().toISOString()),
+        goalScope: null,
+        architectureResearch: null,
+        dependencyResearch: null,
+        validationResearch: null,
+        mergedResearch: null,
+        plan: planningCheckpoint?.plan ?? null,
+        blueprintDraft: planningCheckpoint?.blueprintDraft ?? null,
+        checkpointStage: planningCheckpoint?.stage ?? null,
+        activeBlueprintPath: null
+      },
+      {
+        runName: "construct:planning-plan",
+        tags: ["construct", "planning-plan"],
+        metadata: {
+          buildId: this.buildIdsByJobId.get(jobId) ?? null,
+          sessionId: session.sessionId,
+          goal: session.goal,
+          learningStyle: session.learningStyle,
+          checkpointStage: planningCheckpoint?.stage ?? null,
+          langSmithProject: resolveLangSmithProjectName()
+        }
+      }
+    );
 
     return PlanningSessionCompleteResponseSchema.parse({
       session,
@@ -2048,6 +2616,13 @@ export class ConstructAgentService {
       throw new Error(`Unknown agent job ${jobId}.`);
     }
 
+    await this.markBlueprintBuildStageForJob(jobId, {
+      stage,
+      title,
+      status: "running",
+      detail
+    });
+
     this.emitEvent(job, {
       stage,
       title,
@@ -2055,31 +2630,55 @@ export class ConstructAgentService {
       level: "info"
     });
 
-    const result = await task();
+    try {
+      const result = await task();
 
-    if (stage.startsWith("research")) {
-      const research = result as ResearchDigest;
+      if (stage.startsWith("research")) {
+        const research = result as ResearchDigest;
+        this.emitEvent(job, {
+          stage,
+          title: "Research references loaded",
+          detail: `Collected ${research.sources.length} sources through ${research.query}.`,
+          level: "success",
+          payload: {
+            query: research.query,
+            sources: research.sources
+          }
+        });
+        await this.markBlueprintBuildStageForJob(jobId, {
+          stage,
+          title,
+          status: "completed",
+          detail,
+          outputJson: research
+        });
+        return result;
+      }
+
       this.emitEvent(job, {
         stage,
-        title: "Research references loaded",
-        detail: `Collected ${research.sources.length} sources through ${research.query}.`,
-        level: "success",
-        payload: {
-          query: research.query,
-          sources: research.sources
-        }
+        title: `${title} complete`,
+        detail,
+        level: "success"
       });
+      await this.markBlueprintBuildStageForJob(jobId, {
+        stage,
+        title,
+        status: "completed",
+        detail,
+        outputJson: cloneJsonCompatible(result)
+      });
+
       return result;
+    } catch (error) {
+      await this.markBlueprintBuildStageForJob(jobId, {
+        stage,
+        title,
+        status: "failed",
+        detail: error instanceof Error ? error.message : String(error)
+      });
+      throw error;
     }
-
-    this.emitEvent(job, {
-      stage,
-      title: `${title} complete`,
-      detail,
-      level: "success"
-    });
-
-    return result;
   }
 
   private async withPayloadStage<T extends Record<string, unknown>>(
@@ -2095,6 +2694,13 @@ export class ConstructAgentService {
       throw new Error(`Unknown agent job ${jobId}.`);
     }
 
+    await this.markBlueprintBuildStageForJob(jobId, {
+      stage,
+      title,
+      status: "running",
+      detail
+    });
+
     this.emitEvent(job, {
       stage,
       title,
@@ -2102,17 +2708,34 @@ export class ConstructAgentService {
       level: "info"
     });
 
-    const result = await task();
+    try {
+      const result = await task();
 
-    this.emitEvent(job, {
-      stage,
-      title: `${title} complete`,
-      detail,
-      level: "success",
-      payload: result
-    });
+      this.emitEvent(job, {
+        stage,
+        title: `${title} complete`,
+        detail,
+        level: "success",
+        payload: result
+      });
+      await this.markBlueprintBuildStageForJob(jobId, {
+        stage,
+        title,
+        status: "completed",
+        detail,
+        outputJson: cloneJsonCompatible(result)
+      });
 
-    return result;
+      return result;
+    } catch (error) {
+      await this.markBlueprintBuildStageForJob(jobId, {
+        stage,
+        title,
+        status: "failed",
+        detail: error instanceof Error ? error.message : String(error)
+      });
+      throw error;
+    }
   }
 
   private async determineGoalScope(
@@ -2160,6 +2783,13 @@ export class ConstructAgentService {
       throw new Error(`Unknown agent job ${jobId}.`);
     }
 
+    await this.markBlueprintBuildStageForJob(jobId, {
+      stage,
+      title,
+      status: "running",
+      detail
+    });
+
     this.emitEvent(job, {
       stage,
       title,
@@ -2183,6 +2813,13 @@ export class ConstructAgentService {
         skipped: true,
         reason: "small-local-scope"
       }
+    });
+    await this.markBlueprintBuildStageForJob(jobId, {
+      stage,
+      title,
+      status: "completed",
+      detail,
+      outputJson: result
     });
 
     return result;
@@ -2597,6 +3234,37 @@ export class ConstructAgentService {
       }
     });
     const timestamp = this.now().toISOString();
+    await this.mutateBlueprintBuildForJob(jobId, (current) => ({
+      ...(current ??
+        createBlueprintBuildRecord({
+          id: session.sessionId,
+          sessionId: session.sessionId,
+          goal: session.goal,
+          learningStyle: session.learningStyle,
+          detectedLanguage: session.detectedLanguage,
+          detectedDomain: session.detectedDomain,
+          status: "running",
+          currentStage: "blueprint-materialization",
+          currentStageTitle: "Materializing generated project",
+          currentStageStatus: "running",
+          createdAt: timestamp,
+          updatedAt: timestamp
+        })),
+      planningSession: session,
+      plan,
+      blueprint,
+      blueprintDraft: draft,
+      supportFiles: toBlueprintArtifactFiles(draft.supportFiles, "support"),
+      canonicalFiles: toBlueprintArtifactFiles(draft.canonicalFiles, "canonical"),
+      learnerFiles: toBlueprintArtifactFiles(draft.learnerFiles, "learner"),
+      hiddenTests: toBlueprintArtifactFiles(draft.hiddenTests, "hidden-tests"),
+      status: "running",
+      currentStage: "blueprint-materialization",
+      currentStageTitle: "Materializing generated project",
+      currentStageStatus: "running",
+      updatedAt: timestamp,
+      lastError: null
+    }));
 
     await this.withPayloadStage(
       jobId,
@@ -2659,6 +3327,38 @@ export class ConstructAgentService {
         };
       }
     );
+    await this.mutateBlueprintBuildForJob(jobId, (current) => ({
+      ...(current ??
+        createBlueprintBuildRecord({
+          id: session.sessionId,
+          sessionId: session.sessionId,
+          goal: session.goal,
+          learningStyle: session.learningStyle,
+          detectedLanguage: session.detectedLanguage,
+          detectedDomain: session.detectedDomain,
+          status: "completed",
+          currentStage: "blueprint-activation",
+          currentStageTitle: "Generated workspace activated",
+          currentStageStatus: "completed",
+          createdAt: timestamp,
+          updatedAt: timestamp
+        })),
+      planningSession: session,
+      plan,
+      blueprint,
+      blueprintDraft: draft,
+      supportFiles: toBlueprintArtifactFiles(draft.supportFiles, "support"),
+      canonicalFiles: toBlueprintArtifactFiles(draft.canonicalFiles, "canonical"),
+      learnerFiles: toBlueprintArtifactFiles(draft.learnerFiles, "learner"),
+      hiddenTests: toBlueprintArtifactFiles(draft.hiddenTests, "hidden-tests"),
+      status: "completed",
+      currentStage: "blueprint-activation",
+      currentStageTitle: "Generated workspace activated",
+      currentStageStatus: "completed",
+      updatedAt: this.now().toISOString(),
+      completedAt: this.now().toISOString(),
+      lastError: null
+    }));
     this.logger.info("Persisted generated blueprint and activated it.", {
       sessionId: session.sessionId,
       blueprintPath,
@@ -2711,7 +3411,8 @@ export class ConstructAgentService {
     return (
       (await this.persistence.getPlanningState()) ?? {
         session: null,
-        plan: null
+        plan: null,
+        answers: []
       }
     );
   }
@@ -4269,6 +4970,97 @@ function getExistingLessonSlides(
           ]
         }
       ];
+}
+
+function createBlueprintBuildRecord(input: Partial<BlueprintBuild> & {
+  id: string;
+  goal: string;
+  createdAt: string;
+  updatedAt: string;
+}): BlueprintBuild {
+  return {
+    id: input.id,
+    sessionId: input.sessionId ?? null,
+    userId: input.userId ?? getCurrentUserId(),
+    goal: input.goal,
+    learningStyle: input.learningStyle ?? null,
+    detectedLanguage: input.detectedLanguage ?? null,
+    detectedDomain: input.detectedDomain ?? null,
+    status: input.status ?? "queued",
+    currentStage: input.currentStage ?? null,
+    currentStageTitle: input.currentStageTitle ?? null,
+    currentStageStatus: input.currentStageStatus ?? null,
+    lastError: input.lastError ?? null,
+    langSmithProject: input.langSmithProject ?? resolveLangSmithProjectName(),
+    traceUrl: input.traceUrl ?? null,
+    planningSession: input.planningSession ?? null,
+    answers: input.answers ?? [],
+    plan: input.plan ?? null,
+    blueprint: input.blueprint ?? null,
+    blueprintDraft: input.blueprintDraft ?? null,
+    supportFiles: input.supportFiles ?? [],
+    canonicalFiles: input.canonicalFiles ?? [],
+    learnerFiles: input.learnerFiles ?? [],
+    hiddenTests: input.hiddenTests ?? [],
+    createdAt: input.createdAt,
+    updatedAt: input.updatedAt,
+    completedAt: input.completedAt ?? null,
+    lastEventAt: input.lastEventAt ?? null
+  };
+}
+
+function cloneJsonCompatible<T>(value: T): T {
+  if (value === null || value === undefined) {
+    return value;
+  }
+
+  try {
+    return JSON.parse(JSON.stringify(value)) as T;
+  } catch {
+    return value;
+  }
+}
+
+function stripStageStreamSuffix(stage: string): string {
+  return stage.replace(/-stream$/, "");
+}
+
+function resolveLangSmithProjectName(): string | null {
+  if (!isLangSmithEnabled()) {
+    return null;
+  }
+
+  return (
+    process.env.CONSTRUCT_LANGSMITH_PROJECT?.trim() ||
+    process.env.LANGSMITH_PROJECT?.trim() ||
+    process.env.LANGCHAIN_PROJECT?.trim() ||
+    "construct-project-creation"
+  );
+}
+
+function isLangSmithEnabled(): boolean {
+  const tracingFlag =
+    process.env.CONSTRUCT_LANGSMITH_ENABLED?.trim() ||
+    process.env.LANGSMITH_TRACING?.trim() ||
+    process.env.LANGCHAIN_TRACING_V2?.trim() ||
+    "";
+  const apiKey =
+    process.env.LANGSMITH_API_KEY?.trim() ||
+    process.env.LANGCHAIN_API_KEY?.trim() ||
+    "";
+
+  return Boolean(apiKey) && /^(1|true|yes|on)$/i.test(tracingFlag);
+}
+
+function toBlueprintArtifactFiles(
+  files: Array<{ path: string; content: string }>,
+  group: BlueprintBuild["supportFiles"][number]["group"]
+): BlueprintBuild["supportFiles"] {
+  return files.map((file) => ({
+    path: file.path,
+    content: file.content,
+    group
+  }));
 }
 
 function slugify(value: string): string {

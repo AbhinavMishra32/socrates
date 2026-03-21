@@ -1,6 +1,11 @@
 import { z } from "zod";
 
-import { BlueprintStepSchema, LearnerModelSchema, TaskResultSchema } from "./schemas";
+import {
+  BlueprintStepSchema,
+  LearnerModelSchema,
+  ProjectBlueprintSchema,
+  TaskResultSchema
+} from "./schemas";
 
 export const LearningStyleSchema = z.enum([
   "concept-first",
@@ -132,7 +137,8 @@ export const PlanningSessionCompleteResponseSchema = z.object({
 
 export const CurrentPlanningSessionResponseSchema = z.object({
   session: PlanningSessionSchema.nullable(),
-  plan: GeneratedProjectPlanSchema.nullable()
+  plan: GeneratedProjectPlanSchema.nullable(),
+  answers: z.array(PlanningAnswerSchema).default([])
 });
 
 export const KnowledgeEvidenceSchema = z.object({
@@ -247,6 +253,126 @@ export const AgentJobSnapshotSchema = z.object({
   result: z.unknown().nullable().default(null)
 });
 
+export const BlueprintBuildStatusSchema = z.enum([
+  "queued",
+  "questions-ready",
+  "running",
+  "failed",
+  "completed"
+]);
+
+export const BlueprintBuildStageStatusSchema = z.enum([
+  "pending",
+  "running",
+  "completed",
+  "warning",
+  "failed"
+]);
+
+export const BlueprintBuildArtifactGroupSchema = z.enum([
+  "support",
+  "canonical",
+  "learner",
+  "hidden-tests"
+]);
+
+export const BlueprintBuildArtifactFileSchema = z.object({
+  path: z.string().min(1),
+  content: z.string(),
+  group: BlueprintBuildArtifactGroupSchema
+});
+
+export const BlueprintBuildStageSchema = z.object({
+  id: z.string().min(1),
+  buildId: z.string().min(1),
+  stage: z.string().min(1),
+  title: z.string().min(1),
+  status: BlueprintBuildStageStatusSchema,
+  detail: z.string().nullable().default(null),
+  inputJson: z.unknown().nullable().default(null),
+  outputJson: z.unknown().nullable().default(null),
+  metadataJson: z.unknown().nullable().default(null),
+  traceUrl: z.string().nullable().default(null),
+  startedAt: z.string().datetime(),
+  updatedAt: z.string().datetime(),
+  completedAt: z.string().datetime().nullable().default(null)
+});
+
+export const BlueprintBuildEventRecordSchema = z.object({
+  id: z.string().min(1),
+  buildId: z.string().min(1),
+  jobId: z.string().nullable().default(null),
+  kind: AgentJobKindSchema.nullable().default(null),
+  stage: z.string().min(1),
+  title: z.string().min(1),
+  detail: z.string().nullable().default(null),
+  level: AgentEventLevelSchema,
+  payload: z.unknown().nullable().default(null),
+  traceUrl: z.string().nullable().default(null),
+  timestamp: z.string().datetime()
+});
+
+export const BlueprintBuildSchema = z.object({
+  id: z.string().min(1),
+  sessionId: z.string().min(1).nullable().default(null),
+  userId: z.string().min(1),
+  goal: z.string().min(1),
+  learningStyle: LearningStyleSchema.nullable().default(null),
+  detectedLanguage: z.string().min(1).nullable().default(null),
+  detectedDomain: z.string().min(1).nullable().default(null),
+  status: BlueprintBuildStatusSchema,
+  currentStage: z.string().min(1).nullable().default(null),
+  currentStageTitle: z.string().min(1).nullable().default(null),
+  currentStageStatus: BlueprintBuildStageStatusSchema.nullable().default(null),
+  lastError: z.string().nullable().default(null),
+  langSmithProject: z.string().min(1).nullable().default(null),
+  traceUrl: z.string().nullable().default(null),
+  planningSession: PlanningSessionSchema.nullable().default(null),
+  answers: z.array(PlanningAnswerSchema).default([]),
+  plan: GeneratedProjectPlanSchema.nullable().default(null),
+  blueprint: ProjectBlueprintSchema.nullable().default(null),
+  blueprintDraft: z.unknown().nullable().default(null),
+  supportFiles: z.array(BlueprintBuildArtifactFileSchema).default([]),
+  canonicalFiles: z.array(BlueprintBuildArtifactFileSchema).default([]),
+  learnerFiles: z.array(BlueprintBuildArtifactFileSchema).default([]),
+  hiddenTests: z.array(BlueprintBuildArtifactFileSchema).default([]),
+  createdAt: z.string().datetime(),
+  updatedAt: z.string().datetime(),
+  completedAt: z.string().datetime().nullable().default(null),
+  lastEventAt: z.string().datetime().nullable().default(null)
+});
+
+export const BlueprintBuildSummarySchema = BlueprintBuildSchema.pick({
+  id: true,
+  sessionId: true,
+  userId: true,
+  goal: true,
+  learningStyle: true,
+  detectedLanguage: true,
+  detectedDomain: true,
+  status: true,
+  currentStage: true,
+  currentStageTitle: true,
+  currentStageStatus: true,
+  lastError: true,
+  langSmithProject: true,
+  traceUrl: true,
+  createdAt: true,
+  updatedAt: true,
+  completedAt: true,
+  lastEventAt: true
+});
+
+export const BlueprintBuildListResponseSchema = z.object({
+  builds: z.array(BlueprintBuildSummarySchema).default([])
+});
+
+export const BlueprintBuildDetailResponseSchema = z.object({
+  build: BlueprintBuildSchema.nullable().default(null),
+  stages: z.array(BlueprintBuildStageSchema).default([]),
+  events: z.array(BlueprintBuildEventRecordSchema).default([])
+});
+
 export const RuntimeGuideRequestSchema = z.object({
   stepId: z.string().min(1),
   stepTitle: z.string().min(1),
@@ -320,6 +446,16 @@ export type AgentEventLevel = z.infer<typeof AgentEventLevelSchema>;
 export type AgentEvent = z.infer<typeof AgentEventSchema>;
 export type AgentJobCreatedResponse = z.infer<typeof AgentJobCreatedResponseSchema>;
 export type AgentJobSnapshot = z.infer<typeof AgentJobSnapshotSchema>;
+export type BlueprintBuildStatus = z.infer<typeof BlueprintBuildStatusSchema>;
+export type BlueprintBuildStageStatus = z.infer<typeof BlueprintBuildStageStatusSchema>;
+export type BlueprintBuildArtifactGroup = z.infer<typeof BlueprintBuildArtifactGroupSchema>;
+export type BlueprintBuildArtifactFile = z.infer<typeof BlueprintBuildArtifactFileSchema>;
+export type BlueprintBuildStage = z.infer<typeof BlueprintBuildStageSchema>;
+export type BlueprintBuildEventRecord = z.infer<typeof BlueprintBuildEventRecordSchema>;
+export type BlueprintBuild = z.infer<typeof BlueprintBuildSchema>;
+export type BlueprintBuildSummary = z.infer<typeof BlueprintBuildSummarySchema>;
+export type BlueprintBuildListResponse = z.infer<typeof BlueprintBuildListResponseSchema>;
+export type BlueprintBuildDetailResponse = z.infer<typeof BlueprintBuildDetailResponseSchema>;
 export type RuntimeGuideRequest = z.infer<typeof RuntimeGuideRequestSchema>;
 export type RuntimeGuideResponse = z.infer<typeof RuntimeGuideResponseSchema>;
 export type BlueprintDeepDiveRequest = z.infer<typeof BlueprintDeepDiveRequestSchema>;

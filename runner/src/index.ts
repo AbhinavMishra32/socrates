@@ -118,9 +118,44 @@ const server = http.createServer(async (request, response) => {
         JSON.stringify({
           status: "ready",
           service: `${APP_NAME} Runner`,
-          port
+          port,
+          debugMode: isDebugModeEnabled(),
+          debugBlueprintsPath: isDebugModeEnabled() ? "#/debug/blueprints" : null,
+          langSmithEnabled: isLangSmithEnabled(),
+          langSmithProject: resolveLangSmithProjectName()
         })
       );
+      return;
+    }
+
+    if (request.method === "GET" && request.url === "/debug/blueprints") {
+      assertDebugModeEnabled();
+      response.writeHead(200, { "Content-Type": "application/json" });
+      response.end(
+        JSON.stringify({
+          builds: await getConstructAgent().listBlueprintBuilds()
+        })
+      );
+      return;
+    }
+
+    if (request.method === "GET" && request.url?.startsWith("/debug/blueprints/")) {
+      assertDebugModeEnabled();
+      const url = new URL(request.url, "http://127.0.0.1");
+      const pathParts = url.pathname.split("/").filter(Boolean);
+      const [, , buildId, action] = pathParts;
+
+      if (!buildId) {
+        throw new Error("Missing blueprint build id.");
+      }
+
+      if (action === "stream") {
+        await getConstructAgent().openBlueprintBuildStream(buildId, response);
+        return;
+      }
+
+      response.writeHead(200, { "Content-Type": "application/json" });
+      response.end(JSON.stringify(await getConstructAgent().getBlueprintBuildDetail(buildId)));
       return;
     }
 
@@ -543,4 +578,44 @@ function loadRunnerEnvironment(projectRoot: string): void {
       }
     }
   }
+}
+
+function isDebugModeEnabled(): boolean {
+  return (
+    /^(1|true|yes|on)$/i.test(process.env.CONSTRUCT_DEBUG_MODE?.trim() ?? "") ||
+    Number.parseInt(process.env.CONSTRUCT_DEBUG_LEVEL?.trim() ?? "1", 10) >= 2
+  );
+}
+
+function assertDebugModeEnabled(): void {
+  if (!isDebugModeEnabled()) {
+    throw new Error("Debug mode is disabled. Set CONSTRUCT_DEBUG_MODE=1 to inspect blueprint builds.");
+  }
+}
+
+function isLangSmithEnabled(): boolean {
+  const tracingFlag =
+    process.env.CONSTRUCT_LANGSMITH_ENABLED?.trim() ||
+    process.env.LANGSMITH_TRACING?.trim() ||
+    process.env.LANGCHAIN_TRACING_V2?.trim() ||
+    "";
+  const apiKey =
+    process.env.LANGSMITH_API_KEY?.trim() ||
+    process.env.LANGCHAIN_API_KEY?.trim() ||
+    "";
+
+  return Boolean(apiKey) && /^(1|true|yes|on)$/i.test(tracingFlag);
+}
+
+function resolveLangSmithProjectName(): string | null {
+  if (!isLangSmithEnabled()) {
+    return null;
+  }
+
+  return (
+    process.env.CONSTRUCT_LANGSMITH_PROJECT?.trim() ||
+    process.env.LANGSMITH_PROJECT?.trim() ||
+    process.env.LANGCHAIN_PROJECT?.trim() ||
+    "construct-project-creation"
+  );
 }
